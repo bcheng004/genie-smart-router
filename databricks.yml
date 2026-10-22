@@ -4,7 +4,8 @@ bundle:
 
 variables:
   model:
-    description: Unity Catalog model service the agent calls through Unity AI Gateway
+    description: Unity Catalog model service the agent calls through Unity AI 
+      Gateway
     default: "system.ai.gpt-6-luna"
   router_model:
     description: Small System One model that routes each turn to a Genie agent
@@ -30,7 +31,8 @@ resources:
   apps:
     genie_smart_router:
       name: "genie-smart-router"
-      description: "Genie agents with AI Gateway smart routing and the openjev Genie router"
+      description: "Genie agents with AI Gateway smart routing and the openjev Genie
+        router"
       source_code_path: ./
       # on-behalf-of user auth: forward the user's token (x-forwarded-access-token) for Genie
       # MCP. `genie` is the scope the managed Genie MCP server requires. After changing
@@ -55,14 +57,13 @@ resources:
         - name: tpch_orders_genie
           genie_space:
             name: TPC-H Order Analytics (Router)
-            space_id: ${var.tpch_genie_space_id}
+            space_id: 01f1ce412c4812928628a82e509fa895
             permission: CAN_RUN
         - name: nyc_taxi_genie
           genie_space:
             name: NYC Taxi Trips (Router)
-            space_id: ${var.nyc_taxi_genie_space_id}
+            space_id: 01f1ce412de41d1fa50fc367b24cd52f
             permission: CAN_RUN
-
 targets:
   dev:
     mode: development
