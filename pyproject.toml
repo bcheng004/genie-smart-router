@@ -1,0 +1,33 @@
+[project]
+name = "genie-smart-router"
+version = "0.1.0"
+description = "Genie agents with AI Gateway smart routing and the openjev Genie router"
+requires-python = ">=3.10"
+dependencies = [
+    "dash",
+    "dash-bootstrap-components",
+    "databricks-sdk",
+    "openai-agents",
+    "databricks-openai",
+]
+
+[project.scripts]
+create-genie-agents = "scripts.create_genie_agents:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# only the CLI scripts are packaged; the app modules (app.py, agent.py, ...) stay plain files
+packages = ["scripts"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+index-url = "https://pypi-proxy.dev.databricks.com"
+
+[dependency-groups]
+# local tooling only (scripts/), not installed in the app
+dev = ["ruamel.yaml"]

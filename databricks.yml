@@ -1,0 +1,71 @@
+bundle:
+  name: genie_smart_router
+  engine: direct
+
+variables:
+  model:
+    description: Unity Catalog model service the agent calls through Unity AI Gateway
+    default: "system.ai.gpt-6-luna"
+  router_model:
+    description: Small System One model that routes each turn to a Genie agent
+    default: "system.ai.openjev-qwen35-4b"
+  # Genie agents (scripts/create_genie_agents.py); ids are written by the script or set here
+  tpch_genie_space_id:
+    description: Genie space of the TPC-H Order Analytics agent
+    default: ""
+  nyc_taxi_genie_space_id:
+    description: Genie space of the NYC Taxi Trips agent
+    default: ""
+
+sync:
+  exclude:
+    # pyproject.toml / uv.lock point at the internal PyPI proxy, which Apps can't reach —
+    # the app installs from requirements.txt instead.
+    - pyproject.toml
+    - uv.lock
+    - scripts/**
+    - README.md
+
+resources:
+  apps:
+    genie_smart_router:
+      name: "genie-smart-router"
+      description: "Genie agents with AI Gateway smart routing and the openjev Genie router"
+      source_code_path: ./
+      # on-behalf-of user auth: forward the user's token (x-forwarded-access-token) for Genie
+      # MCP. `genie` is the scope the managed Genie MCP server requires. After changing
+      # scopes, users must sign in to the app again (a fresh browser session) to get a token
+      # with the new scopes.
+      user_api_scopes:
+        - genie
+        - mcp.genie
+      config:
+        command: ["python", "app.py"]
+        env:
+          - name: MODEL
+            value: ${var.model}
+          - name: ROUTER_MODEL
+            value: ${var.router_model}
+          - name: TPCH_GENIE_SPACE_ID
+            value_from: tpch_orders_genie
+          - name: NYC_TAXI_GENIE_SPACE_ID
+            value_from: nyc_taxi_genie
+
+      resources:
+        - name: tpch_orders_genie
+          genie_space:
+            name: TPC-H Order Analytics (Router)
+            space_id: ${var.tpch_genie_space_id}
+            permission: CAN_RUN
+        - name: nyc_taxi_genie
+          genie_space:
+            name: NYC Taxi Trips (Router)
+            space_id: ${var.nyc_taxi_genie_space_id}
+            permission: CAN_RUN
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://fevm-workshop-guy.cloud.databricks.com

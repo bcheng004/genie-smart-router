@@ -1,0 +1,18 @@
+# Secrets & local config — NEVER commit
+*.secret
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Databricks
+.databricks/
+
+# OS
+.DS_Store
+
+.vscode
+uv.lock
