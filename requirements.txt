@@ -3,3 +3,4 @@ dash-bootstrap-components
 databricks-sdk
 openai-agents
 databricks-openai
+psycopg[binary]

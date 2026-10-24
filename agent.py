@@ -16,6 +16,7 @@ Two routing decisions happen per turn, both best-effort:
   * Genie routing — the openjev System One model picks which Genie agent (or none) answers
     (`router.py`), applied as a dynamic MCP tool filter.
 """
+import asyncio
 import functools
 import logging
 import os
@@ -192,6 +193,115 @@ def select_model(prompt: str) -> tuple[str, str | None]:
         return MODEL, None
 
 
+# System One model routing — the smart-router dropdown's second option: instead of the
+# gateway's task_v2 API, a System One judge model answers a choice question over a fixed
+# candidate list. Judges are tried in order until one answers: system.ai.openjev-qwen35-4b
+# (the Genie router's judge) is always provisioned, so it goes first; TypeSafe AI Jev 1.14.0
+# (system.ai.typesafeai-jev-1-14-0, docs.databricks.com → supported-models#typesafe-ai-jev-1140)
+# is provider-hosted and only serves once the account enables the externally hosted TypeSafe AI
+# preview — reorder via MODEL_ROUTER_SYSTEMONE to prefer it once enabled. When no judge
+# answers, the turn falls back to task_v2.
+_SYSTEMONE_JUDGES = [m.strip() for m in os.environ.get(
+    "MODEL_ROUTER_SYSTEMONE",
+    "system.ai.openjev-qwen35-4b,system.ai.typesafeai-jev-1-14-0").split(",") if m.strip()]
+_SYSTEMONE_MIN_CONFIDENCE = float(os.environ.get("MODEL_ROUTER_MIN_CONFIDENCE", "0.5"))
+# openjev's calibration runs low on close-call options (its Genie picks score 0.99; chat
+# models don't), so a pick is also accepted when it clearly separates from the runner-up
+# even under the confidence floor
+_SYSTEMONE_MIN_MARGIN = float(os.environ.get("MODEL_ROUTER_MIN_MARGIN", "0.15"))
+_systemone_judge: str | None = None  # first judge that answered; tried first on later turns
+
+# candidate slots, most-preferred service name first; the first name this workspace actually
+# serves is what the judge picks from (a slot whose names are all unserved drops out — the
+# judge picks only among live endpoints)
+_SYSTEMONE_SLOTS = [
+    (("system.ai.claude-sonnet-5-5", "system.ai.claude-sonnet-5"),
+     "Claude Sonnet (latest) — fast, strong general reasoning"),
+    (("system.ai.claude-opus-5-5", "system.ai.claude-opus-5"),
+     "Claude Opus (latest) — deepest reasoning for hard analysis"),
+    (("system.ai.deepseek-v4-1-flash-1017",),
+     "DeepSeek V4.1 (1017) Flash — fast and economical"),
+]
+
+
+def systemone_candidates() -> dict[str, str]:
+    """The System One router's candidates that this workspace actually serves."""
+    available = chat_models()
+    out = {}
+    for names, desc in _SYSTEMONE_SLOTS:
+        for name in names:
+            if name in available:
+                out[name] = desc
+                break
+    return out
+
+
+async def _systemone_answer(judge: str, prompt: str, candidates: dict[str, str]) -> dict:
+    """One System One choice question to `judge`: which candidate should answer the prompt."""
+    url = str(_client.base_url).split("/ai-gateway/")[0] + "/ai-gateway/typesafe/v1/systemone"
+    resp = await _client.post(url, body={
+        "model": judge,
+        "state": {"LATEST_USER_MESSAGE": prompt},
+        "questions": {"chat_model": {
+            "type": "choice",
+            "instructions": "Decide which chat model should answer LATEST_USER_MESSAGE. "
+                            "Prefer the strongest reasoning model for multi-step data analysis "
+                            "or code; prefer the fast, economical model for simple lookups "
+                            "and small talk.",
+            "criteria": candidates,
+        }},
+    }, cast_to=object)
+    return resp["answers"]["chat_model"]
+
+
+async def select_model_system_one(prompt: str) -> tuple[str, str | None, str]:
+    """select_model's System One twin: the first available judge (see _SYSTEMONE_JUDGES) picks
+    among systemone_candidates(). Returns (model, why, "systemone") — `why` naming the judge
+    that decided and its confidence; falls back to the task_v2 router (kind "task_v2")
+    whenever no judge is available, the pick is unsure or off-list, or there aren't two live
+    candidates."""
+    global _systemone_judge
+    candidates = systemone_candidates()
+    if len(candidates) < 2:
+        _log.warning("systemone routing needs >= 2 candidates, has %s; using task_v2", candidates)
+        return (*select_model(prompt), "task_v2")
+    order = ([_systemone_judge] if _systemone_judge else []) + \
+        [j for j in _SYSTEMONE_JUDGES if j != _systemone_judge]
+    answer = None
+    for judge in order:
+        try:
+            answer = await _systemone_answer(judge, prompt, candidates)
+            break
+        except Exception as e:  # noqa: BLE001 - best-effort: try the next judge
+            _log.warning("%s judge unavailable: %s", judge, e)
+            if _systemone_judge == judge:
+                _systemone_judge = None  # cached judge stopped answering; re-probe next turn
+    if answer is None:
+        return (*select_model(prompt), "task_v2")
+    _systemone_judge = judge
+    choice, confidence = answer.get("choice"), answer.get("confidence") or 0.0
+    probs = {k: v for k, v in (answer.get("probabilities") or {}).items()
+             if isinstance(v, (int, float))}
+    runner_up = max((v for k, v in probs.items() if k != choice), default=0.0)
+    margin = probs.get(choice, 0.0) - runner_up
+    _log.info("%s model route: %s (confidence %.2f, margin %.2f)", judge, answer, confidence,
+              margin)
+    decisive = confidence >= _SYSTEMONE_MIN_CONFIDENCE or margin >= _SYSTEMONE_MIN_MARGIN
+    if choice not in candidates or not decisive:
+        return (*select_model(prompt), "task_v2")
+    return choice, f"{judge.removeprefix('system.ai.')} · confidence {confidence:.2f}", "systemone"
+
+
+async def route_model(prompt: str, kind: str) -> tuple[str, str | None, str]:
+    """Which model answers, by router kind: "task_v2" (the gateway's routing API over all the
+    workspace's chat models) or "systemone" (a System One judge — jev, falling back to
+    openjev — over fixed candidates). Returns (model, rationale, the kind that actually
+    decided)."""
+    if kind == "systemone":
+        return await select_model_system_one(prompt)
+    return (*await asyncio.to_thread(select_model, prompt), "task_v2")
+
+
 def _recent_text(items: list[dict]) -> list[str]:
     """User/assistant text from the conversation so far, for the router's context."""
     out = []
@@ -253,21 +363,24 @@ class MemorySession(SessionABC):
 
 
 async def run(message: str, session: SessionABC, user_client=None, model: str | None = None,
-              on_event=None):
+              on_event=None, model_router: str = "task_v2"):
     """One turn. Returns (reply, model_route, genie_route) — `model_route` is the smart
-    router's (model, rationale) for this prompt; `genie_route` is the openjev router's
-    decision, or None when it was unsure, unavailable, or there was no Genie access.
-    `model` is the chat model for this turn, defaulting to MODEL. `session` supplies and
-    records the conversation (MemorySession keeps it per page load). `on_event`, when set,
-    is called with progress dicts as the turn runs: {"kind": "router"} with the Genie
-    router's decision when it is made, {"kind": "tool"}/{"kind": "tool_out"} as each tool
-    call starts and finishes.
+    router's (model, rationale, kind) for this prompt, `kind` telling which router decided
+    ("task_v2", "systemone", or "manual" when `model` was given); `genie_route` is the
+    openjev router's decision, or None when it was unsure, unavailable, or there was no Genie
+    access. `model` is the chat model for this turn, defaulting to routing via `model_router`
+    ("task_v2" — the gateway's routing API — or "systemone" — the jev judge over fixed
+    candidates). `session` supplies and records the conversation (MemorySession keeps it per
+    page load). `on_event`, when set, is called with progress dicts as the turn runs:
+    {"kind": "router"} with the Genie router's decision when it is made,
+    {"kind": "tool"}/{"kind": "tool_out"} as each tool call starts and finishes.
 
     Genie MCP tools run on behalf of the user via `user_client` (none when it is None) and
     are filtered per turn by the router (`router.genie_tool_filter`, decision kept on the
     run context)."""
     items = await session.get_items()
-    model_route = select_model(message) if not model else (model, None)
+    model_route = ((model, None, "manual") if model
+                   else await route_model(message, model_router))
     context = router.RouterContext(
         client=_client, message=message, recent=_recent_text(items),
         on_decision=(lambda decision: on_event({"kind": "router", "decision": decision}))

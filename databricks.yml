@@ -52,6 +52,10 @@ resources:
             value_from: tpch_orders_genie
           - name: NYC_TAXI_GENIE_SPACE_ID
             value_from: nyc_taxi_genie
+          # durable agent memory (memory.py): value_from resolves to the endpoint resource
+          # path; the host is derived from it in memory.py (nothing else is auto-injected).
+          - name: LAKEBASE_ENDPOINT
+            value_from: agent_memory_postgres
 
       resources:
         - name: tpch_orders_genie
@@ -64,6 +68,13 @@ resources:
             name: NYC Taxi Trips (Router)
             space_id: 01f1ce412de41d1fa50fc367b24cd52f
             permission: CAN_RUN
+        - name: agent_memory_postgres
+          postgres:
+            branch: 
+              projects/genie-smart-router-memory/branches/smart-router-memory
+            database: 
+              projects/genie-smart-router-memory/branches/smart-router-memory/databases/databricks-postgres
+            permission: CAN_CONNECT_AND_CREATE
 targets:
   dev:
     mode: development

@@ -378,11 +378,23 @@ def validate(w: WorkspaceClient, warehouse_id: str) -> bool:
 
 
 def resolve_warehouse(w: WorkspaceClient, warehouse_id: str | None) -> str | None:
-    """--warehouse-id, else the workspace's realtime warehouse (created if missing): the Genie
-    agents run against it."""
+    """--warehouse-id, else the workspace's realtime warehouse (created if missing): used for
+    the example-SQL validation, which any running warehouse serves."""
     if warehouse_id:
         return warehouse_id
     return ensure_realtime_warehouse(w)
+
+
+def resolve_genie_warehouse(w: WorkspaceClient, warehouse_id: str | None) -> str | None:
+    """--warehouse-id, else the workspace's first PRO or SERVERLESS warehouse: the only types
+    Genie runs on (it rejects REALTIME with "Please switch to a Pro or Serverless warehouse",
+    which the Genie MCP server masks as a generic tool error)."""
+    if warehouse_id:
+        return warehouse_id
+    for wh in w.warehouses.list():
+        if wh.warehouse_type in ("PRO", "SERVERLESS"):
+            return wh.id
+    return None
 
 
 def find_space(w: WorkspaceClient, title: str):
@@ -434,8 +446,9 @@ def main() -> None:
     parser.add_argument("--profile", default=os.getenv("DATABRICKS_CONFIG_PROFILE"),
                         help="Databricks CLI profile (default: $DATABRICKS_CONFIG_PROFILE)")
     parser.add_argument("--warehouse-id",
-                        help="SQL warehouse (default: the workspace's realtime warehouse, "
-                             "created if missing)")
+                        help="SQL warehouse (default: the realtime warehouse for example-SQL "
+                             "validation; the Genie agents get the workspace's first PRO or "
+                             "SERVERLESS warehouse — Genie can't run on REALTIME)")
     parser.add_argument("--parent-path", help="Workspace folder for the Genie agents")
     parser.add_argument("--dry-run", action="store_true", help="Print payloads; change nothing")
     parser.add_argument("--validate", action="store_true",
@@ -461,6 +474,12 @@ def main() -> None:
     if args.validate:
         sys.exit(0 if validate(w, warehouse_id) else 1)
 
+    genie_warehouse_id = resolve_genie_warehouse(w, args.warehouse_id)
+    if not genie_warehouse_id:
+        sys.exit("Error: no PRO or SERVERLESS warehouse for the Genie agents (Genie can't run "
+                 "on REALTIME warehouses); pass --warehouse-id")
+    print(f"Genie warehouse: {genie_warehouse_id}")
+
     created = []
     for agent in AGENTS:
         payload = json.dumps(build_serialized_space(agent))
@@ -468,10 +487,11 @@ def main() -> None:
         if existing:
             space = w.genie.update_space(existing.space_id, serialized_space=payload,
                                          description=agent["description"],
-                                         warehouse_id=warehouse_id)
+                                         warehouse_id=genie_warehouse_id)
             print(f"Updated Genie agent {agent['title']!r}: {space.space_id}")
         else:
-            space = w.genie.create_space(warehouse_id=warehouse_id, serialized_space=payload,
+            space = w.genie.create_space(warehouse_id=genie_warehouse_id,
+                                         serialized_space=payload,
                                          title=agent["title"], description=agent["description"],
                                          parent_path=args.parent_path)
             print(f"Created Genie agent {agent['title']!r}: {space.space_id}")

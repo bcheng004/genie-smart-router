@@ -9,6 +9,7 @@ dependencies = [
     "databricks-sdk",
     "openai-agents",
     "databricks-openai",
+    "psycopg[binary]",
 ]
 
 [project.scripts]
