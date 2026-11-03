@@ -3,6 +3,16 @@ bundle:
   engine: direct
 
 variables:
+  app_name:
+    description: Workspace-global name of the router app
+    default: genie-router-${workspace.current_user.domain_friendly_name}
+  memory_volume:
+    description: Unity Catalog volume containing manually selected memory events
+  memory_pipeline_id:
+    description: Pipeline to run when the signed-in user clicks Distill memory
+  shared_memory_storage:
+    description: Show an explicit shared-storage warning before publication
+    default: "false"
   model:
     description: Unity Catalog model service the agent calls through Unity AI 
       Gateway
@@ -18,19 +28,20 @@ variables:
     description: Genie space of the NYC Taxi Trips agent
     default: ""
 
+  genie_dataset:
+    default: asana
 sync:
   exclude:
     # pyproject.toml / uv.lock point at the internal PyPI proxy, which Apps can't reach —
     # the app installs from requirements.txt instead.
     - pyproject.toml
-    - uv.lock
     - scripts/**
     - README.md
 
 resources:
   apps:
     genie_smart_router:
-      name: "genie-smart-router"
+      name: ${var.app_name}
       description: "Genie agents with AI Gateway smart routing and the openjev Genie
         router"
       source_code_path: ./
@@ -48,26 +59,31 @@ resources:
             value: ${var.model}
           - name: ROUTER_MODEL
             value: ${var.router_model}
-          - name: TPCH_GENIE_SPACE_ID
-            value_from: tpch_orders_genie
-          - name: NYC_TAXI_GENIE_SPACE_ID
-            value_from: nyc_taxi_genie
-          # durable agent memory (memory.py): value_from resolves to the endpoint resource
-          # path; the host is derived from it in memory.py (nothing else is auto-injected).
           - name: LAKEBASE_ENDPOINT
             value_from: agent_memory_postgres
+          - name: LONG_TERM_MEMORY_VOLUME
+            value_from: memory_events
+          - name: LONG_TERM_MEMORY_PIPELINE_ID
+            value: ${var.memory_pipeline_id}
+          - name: LONG_TERM_MEMORY_AUTO_EXPORT
+            value: "false"
+          - name: LONG_TERM_MEMORY_SHARED_STORAGE
+            value: ${var.shared_memory_storage}
 
+          - name: GENIE_DATASET
+            value: ${var.genie_dataset}
+          - name: GENIE_CUSTOM_CLAIMS
+            value: 'true'
+          - name: ASANA_REVENUE_GENIE_SPACE_ID
+            value_from: asana_revenue_genie
+          - name: ASANA_MARKETING_GENIE_SPACE_ID
+            value_from: asana_marketing_genie
       resources:
-        - name: tpch_orders_genie
-          genie_space:
-            name: TPC-H Order Analytics (Router)
-            space_id: 01f1ce412c4812928628a82e509fa895
-            permission: CAN_RUN
-        - name: nyc_taxi_genie
-          genie_space:
-            name: NYC Taxi Trips (Router)
-            space_id: 01f1ce412de41d1fa50fc367b24cd52f
-            permission: CAN_RUN
+        - name: memory_events
+          uc_securable:
+            securable_full_name: ${var.memory_volume}
+            securable_type: VOLUME
+            permission: WRITE_VOLUME
         - name: agent_memory_postgres
           postgres:
             branch: 
@@ -75,6 +91,16 @@ resources:
             database: 
               projects/genie-smart-router-memory/branches/smart-router-memory/databases/databricks-postgres
             permission: CAN_CONNECT_AND_CREATE
+        - name: asana_revenue_genie
+          genie_space:
+            name: Asana Revenue (Synthetic Claims Router)
+            space_id: 01f1d744b923143ba9ca9674f24b978b
+            permission: CAN_RUN
+        - name: asana_marketing_genie
+          genie_space:
+            name: Asana Marketing (Synthetic Claims Router)
+            space_id: 01f1d744b9f31c018966ce4acb1b42ac
+            permission: CAN_RUN
 targets:
   dev:
     mode: development

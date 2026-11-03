@@ -261,14 +261,27 @@ def copy_sessions(src_chat_id: str, dst_chat_id: str) -> None:
 
 def save_chat(user: str, rec: dict) -> None:
     """Upsert a chat's metadata + rendered transcript (the agent's items live in sessions)."""
-    _run(lambda conn: conn.execute(
-        f'INSERT INTO "{SCHEMA}".chats (chat_id, app_user, title, created, updated, '
-        "branch_of, events) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (chat_id) DO UPDATE SET title = EXCLUDED.title, "
-        "updated = EXCLUDED.updated, branch_of = EXCLUDED.branch_of, "
-        "events = EXCLUDED.events",
-        (rec["id"], user, rec["title"], rec["created"], rec["updated"],
-         rec.get("branch_of"), Json(rec["events"]))))
+    from long_term_memory import auto_export_enabled
+    from memory_pipeline.events import source_events
+    from memory_pipeline.store import enqueue, ensure_tables
+
+    export = auto_export_enabled()
+
+    def save(conn):
+        with conn.transaction():
+            conn.execute(
+                f'INSERT INTO "{SCHEMA}".chats (chat_id, app_user, title, created, updated, '
+                "branch_of, events) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (chat_id) DO UPDATE SET title = EXCLUDED.title, "
+                "updated = EXCLUDED.updated, branch_of = EXCLUDED.branch_of, "
+                "events = EXCLUDED.events",
+                (rec["id"], user, rec["title"], rec["created"], rec["updated"],
+                 rec.get("branch_of"), Json(rec["events"])))
+            if export:
+                ensure_tables(conn, SCHEMA)
+                enqueue(conn, SCHEMA, source_events(user, rec))
+
+    _run(save)
 
 
 def load_chats(user: str) -> list[dict]:

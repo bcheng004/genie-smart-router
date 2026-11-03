@@ -14,14 +14,14 @@ dependencies = [
 
 [project.scripts]
 create-genie-agents = "scripts.create_genie_agents:main"
+generate-asana-data = "scripts.generate_asana_data:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# only the CLI scripts are packaged; the app modules (app.py, agent.py, ...) stay plain files
-packages = ["scripts"]
+packages = ["scripts", "claims_auth"]
 
 [tool.hatch.metadata]
 allow-direct-references = true

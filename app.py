@@ -11,6 +11,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
 import dash
 import dash_bootstrap_components as dbc
@@ -19,7 +20,10 @@ from flask import request
 
 import agent
 import genie
+import long_term_memory
 import memory
+import memory_actions
+import claims_auth
 
 _log = logging.getLogger(__name__)
 
@@ -33,14 +37,24 @@ def _on_loop(coro):
     return asyncio.run_coroutine_threadsafe(coro, _loop).result()
 
 
-def _user() -> str:
+def _user_email() -> str:
     """The signed-in user (forwarded by Databricks Apps; DEV_USER locally) — scopes the
     in-memory chats."""
     try:
-        return request.headers.get("X-Forwarded-Email") or os.environ.get(
-            "DEV_USER", "local-user")
+        email = request.headers.get("X-Forwarded-Email")
+        return email or ("local-user" if os.environ.get("DATABRICKS_APP_NAME") else
+                         os.environ.get("DEV_USER", "local-user"))
     except RuntimeError:  # no request context (Dash validates the layout at import)
         return "local-user"
+
+
+def _user(requested_role: str | None = None) -> str:
+    return claims_auth.memory_actor(_user_email(), requested_role)
+
+
+def _claim_changed() -> bool:
+    return (dash.ctx.triggered_id == "claim-role"
+            or "claim-role.value" in getattr(dash.ctx, "triggered_prop_ids", {}))
 
 
 def _user_token() -> str | None:
@@ -184,7 +198,7 @@ def _chat_view(user: str) -> list:
     events = _chat_events(user)
     if not events:
         return [html.Div([html.I(className="bi bi-chat-left-dots me-2"),
-                          "Start a chat — ask about TPC-H orders or NYC taxi trips."],
+                          f"Start a chat — ask about {genie.CHAT_TOPICS}."],
                          className="chat-empty")]
     return _transcript(events)
 
@@ -218,6 +232,9 @@ server = app.server
 
 # probe the Lakebase branch in the background (ready, or fall back to in-memory sessions)
 threading.Thread(target=memory.warm, daemon=True, name="memory-warm").start()
+if long_term_memory.source_path():
+    threading.Thread(target=long_term_memory.warm, daemon=True, name="memory-tables-warm").start()
+long_term_memory.start_publisher()
 
 
 def _layout():
@@ -230,6 +247,16 @@ def _layout():
         live = _live.get(user)
     return html.Div([
         dcc.Interval(id="tick", interval=1000, disabled=not (live and not live.get("done"))),
+        dcc.Interval(id="memory-tick", interval=2000,
+                     disabled=not memory_actions.status(user)["running"]),
+        dcc.Store(id="long-term-memory-was-running", data=None),
+        dcc.ConfirmDialog(id="memory-confirm", message=(
+            "Publish this conversation's user messages and distill durable facts? "
+            "Source messages, evidence and extracted facts are retained. "
+            + ("WARNING: the selected catalog grants all account users access to these "
+               "source messages, including write access. Do not submit private or sensitive information. "
+               if os.environ.get("LONG_TERM_MEMORY_SHARED_STORAGE") == "true" else "")
+            + "Other conversations will not be exported. Model inference incurs usage.")),
         html.Div(className="app-shell", children=[
             html.Div(id="sidebar", className="sidebar", children=_sidebar(user)),
             html.Div(className="main", children=[
@@ -241,6 +268,20 @@ def _layout():
                                   title="Each turn is routed: a model router picks the chat "
                                         "model, and the openjev router picks the Genie agent"),
                         html.Div(dcc.Dropdown(
+                            id="claim-role", clearable=False, searchable=False,
+                            className="router-select",
+                            options=([
+                                {"label": "Claim: admin — revenue allowed", "value": "admin"},
+                                {"label": "Claim: user — revenue denied", "value": "user"},
+                            ] if claims_auth.role_for(_user_email()) == "admin" else [
+                                {"label": "Claim: user — revenue denied", "value": "user"},
+                            ]),
+                            value=claims_auth.role_for(_user_email()),
+                            disabled=claims_auth.role_for(_user_email()) != "admin",
+                        ), className="claim-select-wrap",
+                                  style={} if claims_auth.enabled() else {"display": "none"},
+                                  title="Only the verified admin can switch claims for testing; histories stay separate"),
+                        html.Div(dcc.Dropdown(
                             id="model-router", clearable=False, className="router-select",
                             options=[
                                 {"label": "Router: Unity Gateway (task_v2)",
@@ -251,19 +292,114 @@ def _layout():
                         ), className="router-select-wrap"),
                     ], className="header-right"),
                 ], className="app-header"),
+                html.Div([
+                    html.Button([html.I(className="bi bi-stars me-2"), "Distill memory"],
+                                id="distill-memory", n_clicks=0, className="memory-btn",
+                                disabled=not memory_actions.configured() or not data["active"]),
+                    html.Div(id="memory-status", children=memory_actions.status(user)["message"],
+                             role="status", **{"aria-live": "polite"}),
+                    html.Small("Only this chat’s user messages · recalled in new chats",
+                               className="memory-note"),
+                ], className="memory-panel"),
                 html.Div(id="chat", className="chat", children=_chat_view(user)),
                 html.Div([
-                    dcc.Input(id="msg", placeholder="Ask about TPC-H orders or NYC taxi trips…",
+                    dcc.Input(id="msg", placeholder=f"Ask about {genie.CHAT_TOPICS}…",
                               className="msg-input", type="text", debounce=True, n_submit=0),
                     html.Button(html.I(className="bi bi-send-fill"), id="send", n_clicks=0,
                                 className="send-btn"),
                 ], className="input-bar"),
             ]),
+            html.Aside([
+                html.Div([
+                    html.H4("Long-term memory", id="long-term-memory-heading"),
+                    html.Button("Refresh", id="refresh-long-term-memory", n_clicks=0,
+                                className="memory-btn", type="button"),
+                ], className="long-term-memory-header"),
+                html.P("Saved facts for your account · recalled in new chats",
+                       className="long-term-memory-note"),
+                dcc.Loading(html.Div("Loading saved memories…", id="long-term-memory-list",
+                                     role="status", **{"aria-live": "polite"}), type="circle"),
+                html.Small("Source: Lakebase · most recent 50 facts · refreshes after distillation",
+                           className="long-term-memory-note"),
+            ], className="long-term-memory-sidebar",
+               **{"aria-labelledby": "long-term-memory-heading"}),
         ]),
     ])
 
 
 app.layout = _layout
+
+
+def _long_term_memory_view(user: str):
+    try:
+        if not long_term_memory.source_path() or not memory.use_durable():
+            return html.P("Long-term memory storage is not available.", className="sidebar-empty")
+        memories = long_term_memory.list_memories(user)
+    except Exception:
+        _log.exception("Could not load long-term memory sidebar")
+        return html.P("Could not load saved memories. Use Refresh to try again.",
+                      className="sidebar-empty", role="alert")
+    if not memories:
+        return html.P("No saved facts yet. Use Distill memory on a chat to save durable facts.",
+                      className="sidebar-empty")
+    return [html.Article([
+        html.Div(fact["key"], className="long-term-memory-key"),
+        html.P(fact["content"], className="long-term-memory-content"),
+        html.Small(f"Version {fact['version']} · source "
+                   + datetime.fromtimestamp(fact["source_at"], timezone.utc).strftime("%b %d, %Y %H:%M UTC"),
+                   className="long-term-memory-note"),
+    ], className="long-term-memory-card") for fact in memories]
+
+
+@app.callback(Output("long-term-memory-list", "children"),
+              Output("long-term-memory-was-running", "data"),
+              Input("refresh-long-term-memory", "n_clicks"), Input("memory-tick", "disabled"),
+              Input("claim-role", "value"),
+              State("long-term-memory-was-running", "data"))
+def _refresh_long_term_memory(clicks, interval_disabled, claim_sel, was_running):
+    running = not interval_disabled
+    if (not _claim_changed() and dash.ctx.triggered_id == "memory-tick" and was_running is not None
+            and (running or not was_running)):
+        return dash.no_update, running
+    return _long_term_memory_view(_user(claim_sel)), running
+
+
+@app.callback(Output("memory-confirm", "displayed"), Input("distill-memory", "n_clicks"),
+              Input("claim-role", "value"),
+              prevent_initial_call=True)
+def _confirm_distillation(clicks, claim_sel=None):
+    if _claim_changed():
+        return False
+    return bool(clicks)
+
+
+@app.callback(Output("memory-status", "children"), Output("distill-memory", "disabled"),
+              Output("memory-tick", "disabled"), Input("memory-confirm", "submit_n_clicks"),
+              Input("memory-tick", "n_intervals"), Input("sidebar", "children"),
+              Input("tick", "n_intervals"), Input("claim-role", "value"))
+def _memory_progress(submits, memory_ticks, sidebar, chat_ticks, claim_sel=None):
+    user = _user(claim_sel)
+    with _live_lock:
+        busy = bool(_live.get(user) and not _live[user].get("done"))
+    if not _claim_changed() and dash.ctx.triggered_id == "memory-confirm" and submits:
+        if busy:
+            return "Wait for the current chat turn to finish before distilling.", True, True
+        _settle(user)
+        try:
+            memory_actions.start(user, _user_state(user)["active"])
+        except ValueError as error:
+            return str(error), not memory_actions.configured(), True
+    progress = memory_actions.status(user)
+    children = [html.Span(progress["message"])]
+    if progress.get("url"):
+        children.append(html.A("Pipeline details ↗", href=progress["url"], target="_blank",
+                               rel="noopener noreferrer", className="memory-link"))
+    configured = memory_actions.configured()
+    if not configured:
+        children = "Memory distillation is not configured or durable storage is unavailable."
+    disabled = (not configured or busy or progress["running"]
+                or not _user_state(user)["active"])
+    return children, disabled, not progress["running"]
 
 
 def _pretty(text: str) -> str:
@@ -349,6 +485,9 @@ def _execute_turn(live: dict, text: str, token: str | None):
         client = genie.user_client(token)
         reply, model_route, _ = _on_loop(agent.run(
             text, session=live["session"], user_client=client,
+            actor_id=live["actor_id"],
+            actor_email=live.get("actor_email"),
+            actor_role=live.get("actor_role"),
             model_router=live.get("router") or "task_v2",
             on_event=lambda ev: _live_event(live, ev)))
         _live_event(live, {"kind": "model", "model": model_route[0], "why": model_route[1],
@@ -369,19 +508,24 @@ def _execute_turn(live: dict, text: str, token: str | None):
               Input({"type": "session-item", "index": ALL}, "n_clicks"),
               Input({"type": "branch-btn", "index": ALL}, "n_clicks"),
               Input("model-router", "value"),
+              Input("claim-role", "value"),
               State("msg", "value"))
-def on_message(_send, _submit, _tick, _new, _items, _branch, router_sel, text):
+def on_message(_send, _submit, _tick, _new, _items, _branch, router_sel, claim_sel, text):
     """Every chat interaction in one callback — send, poll, New chat, pick a session,
     branch a session, pick the model router — since they all read the same state. `tick`
     renders the in-flight turn each second; when the turn completes, its events fold into
     the session record."""
-    user = _user()
+    user = _user(claim_sel)
     data = _user_state(user)
     _ensure_loaded(user)
-    tid = dash.ctx.triggered_id
+    tid = "claim-role" if _claim_changed() else dash.ctx.triggered_id
     with _live_lock:
         live = _live.get(user)
     busy = live is not None and not live.get("done")
+
+    if tid == "claim-role":
+        _settle(user)
+        return _chat_view(user), _sidebar(user), "", busy, busy, not busy
 
     if tid == "model-router":  # smart-router choice; applies from the next turn on
         data["router"] = router_sel or "task_v2"
@@ -427,7 +571,10 @@ def on_message(_send, _submit, _tick, _new, _items, _branch, router_sel, text):
         data["active"] = rec["id"]
 
     token = _user_token()
-    new_live = {"sid": rec["id"], "events": [{"kind": "user", "text": text.strip()}],
+    new_live = {"sid": rec["id"], "actor_id": user, "actor_email": _user_email(),
+                "actor_role": claims_auth.effective_role(_user_email(), claim_sel),
+                "events": [{"kind": "user", "text": text.strip(),
+                            "event_id": uuid.uuid4().hex, "created": time.time()}],
                 "done": False, "error": None, "session": rec["session"],
                 "router": data.get("router") or "task_v2"}
     with _live_lock:
