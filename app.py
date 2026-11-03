@@ -48,8 +48,13 @@ def _user_email() -> str:
         return "local-user"
 
 
-def _user() -> str:
-    return claims_auth.memory_actor(_user_email())
+def _user(requested_role: str | None = None) -> str:
+    return claims_auth.memory_actor(_user_email(), requested_role)
+
+
+def _claim_changed() -> bool:
+    return (dash.ctx.triggered_id == "claim-role"
+            or "claim-role.value" in getattr(dash.ctx, "triggered_prop_ids", {}))
 
 
 def _user_token() -> str | None:
@@ -262,10 +267,20 @@ def _layout():
                                    "Smart routing"], className="route-badge",
                                   title="Each turn is routed: a model router picks the chat "
                                         "model, and the openjev router picks the Genie agent"),
-                        html.Span(f"Revenue: {claims_auth.role_for(_user_email())}",
-                                  className="route-badge",
+                        html.Div(dcc.Dropdown(
+                            id="claim-role", clearable=False, searchable=False,
+                            className="router-select",
+                            options=([
+                                {"label": "Claim: admin — revenue allowed", "value": "admin"},
+                                {"label": "Claim: user — revenue denied", "value": "user"},
+                            ] if claims_auth.role_for(_user_email()) == "admin" else [
+                                {"label": "Claim: user — revenue denied", "value": "user"},
+                            ]),
+                            value=claims_auth.role_for(_user_email()),
+                            disabled=claims_auth.role_for(_user_email()) != "admin",
+                        ), className="claim-select-wrap",
                                   style={} if claims_auth.enabled() else {"display": "none"},
-                                  title="Revenue access is assigned on the server, not selected here"),
+                                  title="Only the verified admin can switch claims for testing; histories stay separate"),
                         html.Div(dcc.Dropdown(
                             id="model-router", clearable=False, className="router-select",
                             options=[
@@ -339,30 +354,34 @@ def _long_term_memory_view(user: str):
 @app.callback(Output("long-term-memory-list", "children"),
               Output("long-term-memory-was-running", "data"),
               Input("refresh-long-term-memory", "n_clicks"), Input("memory-tick", "disabled"),
+              Input("claim-role", "value"),
               State("long-term-memory-was-running", "data"))
-def _refresh_long_term_memory(clicks, interval_disabled, was_running):
+def _refresh_long_term_memory(clicks, interval_disabled, claim_sel, was_running):
     running = not interval_disabled
-    if (dash.ctx.triggered_id == "memory-tick" and was_running is not None
+    if (not _claim_changed() and dash.ctx.triggered_id == "memory-tick" and was_running is not None
             and (running or not was_running)):
         return dash.no_update, running
-    return _long_term_memory_view(_user()), running
+    return _long_term_memory_view(_user(claim_sel)), running
 
 
 @app.callback(Output("memory-confirm", "displayed"), Input("distill-memory", "n_clicks"),
+              Input("claim-role", "value"),
               prevent_initial_call=True)
-def _confirm_distillation(clicks):
+def _confirm_distillation(clicks, claim_sel=None):
+    if _claim_changed():
+        return False
     return bool(clicks)
 
 
 @app.callback(Output("memory-status", "children"), Output("distill-memory", "disabled"),
               Output("memory-tick", "disabled"), Input("memory-confirm", "submit_n_clicks"),
               Input("memory-tick", "n_intervals"), Input("sidebar", "children"),
-              Input("tick", "n_intervals"))
-def _memory_progress(submits, memory_ticks, sidebar, chat_ticks):
-    user = _user()
+              Input("tick", "n_intervals"), Input("claim-role", "value"))
+def _memory_progress(submits, memory_ticks, sidebar, chat_ticks, claim_sel=None):
+    user = _user(claim_sel)
     with _live_lock:
         busy = bool(_live.get(user) and not _live[user].get("done"))
-    if dash.ctx.triggered_id == "memory-confirm" and submits:
+    if not _claim_changed() and dash.ctx.triggered_id == "memory-confirm" and submits:
         if busy:
             return "Wait for the current chat turn to finish before distilling.", True, True
         _settle(user)
@@ -468,6 +487,7 @@ def _execute_turn(live: dict, text: str, token: str | None):
             text, session=live["session"], user_client=client,
             actor_id=live["actor_id"],
             actor_email=live.get("actor_email"),
+            actor_role=live.get("actor_role"),
             model_router=live.get("router") or "task_v2",
             on_event=lambda ev: _live_event(live, ev)))
         _live_event(live, {"kind": "model", "model": model_route[0], "why": model_route[1],
@@ -488,19 +508,24 @@ def _execute_turn(live: dict, text: str, token: str | None):
               Input({"type": "session-item", "index": ALL}, "n_clicks"),
               Input({"type": "branch-btn", "index": ALL}, "n_clicks"),
               Input("model-router", "value"),
+              Input("claim-role", "value"),
               State("msg", "value"))
-def on_message(_send, _submit, _tick, _new, _items, _branch, router_sel, text):
+def on_message(_send, _submit, _tick, _new, _items, _branch, router_sel, claim_sel, text):
     """Every chat interaction in one callback — send, poll, New chat, pick a session,
     branch a session, pick the model router — since they all read the same state. `tick`
     renders the in-flight turn each second; when the turn completes, its events fold into
     the session record."""
-    user = _user()
+    user = _user(claim_sel)
     data = _user_state(user)
     _ensure_loaded(user)
-    tid = dash.ctx.triggered_id
+    tid = "claim-role" if _claim_changed() else dash.ctx.triggered_id
     with _live_lock:
         live = _live.get(user)
     busy = live is not None and not live.get("done")
+
+    if tid == "claim-role":
+        _settle(user)
+        return _chat_view(user), _sidebar(user), "", busy, busy, not busy
 
     if tid == "model-router":  # smart-router choice; applies from the next turn on
         data["router"] = router_sel or "task_v2"
@@ -547,6 +572,7 @@ def on_message(_send, _submit, _tick, _new, _items, _branch, router_sel, text):
 
     token = _user_token()
     new_live = {"sid": rec["id"], "actor_id": user, "actor_email": _user_email(),
+                "actor_role": claims_auth.effective_role(_user_email(), claim_sel),
                 "events": [{"kind": "user", "text": text.strip(),
                             "event_id": uuid.uuid4().hex, "created": time.time()}],
                 "done": False, "error": None, "session": rec["session"],

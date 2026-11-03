@@ -161,11 +161,16 @@ Add `--marketing` during verification to also check that `marketing_by_claim` ke
 rows visible but masks `attributed_new_mrr_usd` for every non-admin claim.
 
 The Asana app enables `GENIE_CUSTOM_CLAIMS=true`. Only the verified signed-in identity
-`bo.cheng@databricks.com` receives the `admin` claim; every other identity receives `user`.
+`bo.cheng@databricks.com` can receive the `admin` claim; every other identity receives `user`.
 The app checks the forwarded email against the user token's current-user identity before
 minting an OAuth token with its auto-injected `DATABRICKS_CLIENT_ID` and
 `DATABRICKS_CLIENT_SECRET`. Missing identities, credentials or token errors fail closed;
-there is no unclaimed-token fallback and no browser-controlled role selector.
+there is no unclaimed-token fallback. The admin-only **Claim** dropdown lets Bo switch between
+`admin` and `user` to test the views. Other users see a disabled `user` selection; even forged
+requests cannot elevate them. Invalid selections fail closed to `user`. The dropdown is scoped
+to the current page, and each turn captures its effective claim before starting. Switching
+claims reloads the corresponding chats and long-term-memory sidebar, without copying history
+between roles. Switching back to `admin` restores that role's chats and facts.
 
 In this mode the tools use the documented Genie Conversation API rather than relying on
 undocumented claim propagation through MCP. Each tool invocation starts a new conversation,

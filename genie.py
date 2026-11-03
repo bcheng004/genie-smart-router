@@ -104,11 +104,11 @@ def _claim_tool(name: str, space_id: str, client, role: str):
     return query
 
 
-async def claim_tools(end_user_client, email: str):
+async def claim_tools(end_user_client, email: str, requested_role: str | None = None):
     if DATASET != "asana":
         raise ValueError("Custom revenue claims require the Asana dataset")
-    client = await asyncio.to_thread(claims_auth.client_for, end_user_client, email)
-    return [_claim_tool(name, space_id, client, claims_auth.role_for(email))
+    client = await asyncio.to_thread(claims_auth.client_for, end_user_client, email, requested_role)
+    return [_claim_tool(name, space_id, client, claims_auth.effective_role(email, requested_role))
             for name, space_id in SPACES.items()]
 
 

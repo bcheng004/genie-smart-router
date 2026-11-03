@@ -23,10 +23,16 @@ def role_for(email: str | None) -> str:
     return "admin" if canonical_email(email) == ADMIN_EMAIL else "user"
 
 
-def memory_actor(email: str) -> str:
+def effective_role(email: str | None, requested_role: str | None = None) -> str:
+    if role_for(email) != "admin":
+        return "user"
+    return "admin" if requested_role is None or requested_role == "admin" else "user"
+
+
+def memory_actor(email: str, requested_role: str | None = None) -> str:
     if not enabled():
         return email
-    return f"{canonical_email(email)}|{MEMORY_POLICY}|{role_for(email)}"
+    return f"{canonical_email(email)}|{MEMORY_POLICY}|{effective_role(email, requested_role)}"
 
 
 def claim_token(host: str, client_id: str, client_secret: str, claim: str | None) -> str:
@@ -51,7 +57,7 @@ def claim_token(host: str, client_id: str, client_secret: str, claim: str | None
     return token
 
 
-def client_for(end_user_client, email: str):
+def client_for(end_user_client, email: str, requested_role: str | None = None):
     """Validate the end user before selecting a server-owned role and issuing credentials."""
     if end_user_client is None or not canonical_email(email):
         raise PermissionError("A signed-in user is required for claim-aware Genie access")
@@ -61,5 +67,6 @@ def client_for(end_user_client, email: str):
     prefix = "DATABRICKS" if os.environ.get("DATABRICKS_APP_NAME") else "REVENUE_CLAIMS"
     token = claim_token(end_user_client.config.host,
                         os.environ.get(f"{prefix}_CLIENT_ID", ""),
-                        os.environ.get(f"{prefix}_CLIENT_SECRET", ""), role_for(actual))
+                        os.environ.get(f"{prefix}_CLIENT_SECRET", ""),
+                        effective_role(actual, requested_role))
     return WorkspaceClient(host=end_user_client.config.host, token=token, auth_type="pat")

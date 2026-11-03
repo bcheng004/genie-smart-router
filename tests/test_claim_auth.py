@@ -20,6 +20,12 @@ class ClaimAuthTests(unittest.TestCase):
             with self.subTest(email=email):
                 self.assertEqual(claims_auth.role_for(email), "user")
 
+    def test_only_verified_admin_can_select_admin_and_invalid_choices_fail_closed(self):
+        for selection, expected in ((None, "admin"), ("admin", "admin"), ("user", "user"),
+                                    ("invalid", "user"), ("Admin", "user"), ("", "user")):
+            self.assertEqual(claims_auth.effective_role(claims_auth.ADMIN_EMAIL, selection), expected)
+            self.assertEqual(claims_auth.effective_role("other@databricks.com", selection), "user")
+
     def test_memory_scope_does_not_reuse_legacy_or_other_users_facts(self):
         with patch.dict(os.environ, {"GENIE_CUSTOM_CLAIMS": "true"}):
             admin = claims_auth.memory_actor(claims_auth.ADMIN_EMAIL)
@@ -28,6 +34,10 @@ class ClaimAuthTests(unittest.TestCase):
             self.assertEqual(user, "other@databricks.com|revenue-claims-v1|user")
             self.assertNotEqual(admin, user)
             self.assertNotEqual(admin, claims_auth.ADMIN_EMAIL)
+            downgraded = claims_auth.memory_actor(claims_auth.ADMIN_EMAIL, "user")
+            self.assertNotEqual(admin, downgraded)
+            self.assertNotEqual(user, downgraded)
+            self.assertEqual(admin, claims_auth.memory_actor(claims_auth.ADMIN_EMAIL, "admin"))
         with patch.dict(os.environ, {"GENIE_CUSTOM_CLAIMS": "false"}):
             self.assertEqual(claims_auth.memory_actor("alice"), "alice")
 
@@ -42,7 +52,9 @@ class ClaimAuthTests(unittest.TestCase):
                 mint.assert_not_called()
 
     def test_verified_identity_determines_claim_and_app_credentials_stay_server_side(self):
-        for email, role in ((claims_auth.ADMIN_EMAIL, "admin"), ("other@databricks.com", "user")):
+        for email, selection, role in ((claims_auth.ADMIN_EMAIL, None, "admin"),
+                                      (claims_auth.ADMIN_EMAIL, "user", "user"),
+                                      ("other@databricks.com", "admin", "user")):
             caller = Mock()
             caller.config.host = "https://workspace.example"
             caller.current_user.me.return_value.user_name = email
@@ -51,7 +63,7 @@ class ClaimAuthTests(unittest.TestCase):
                                         "DATABRICKS_CLIENT_SECRET": "app-secret"}), \
                     patch.object(claims_auth, "claim_token", return_value="scoped-token") as mint, \
                     patch.object(claims_auth, "WorkspaceClient") as workspace:
-                claims_auth.client_for(caller, email)
+                claims_auth.client_for(caller, email, selection)
                 mint.assert_called_once_with("https://workspace.example", "app-id", "app-secret", role)
                 workspace.assert_called_once_with(host="https://workspace.example",
                                                   token="scoped-token", auth_type="pat")
@@ -76,6 +88,19 @@ class ClaimAuthTests(unittest.TestCase):
 
 
 class ClaimGenieTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admin_user_preview_mints_and_uses_only_the_user_claim(self):
+        client = Mock()
+        with patch.object(genie, "DATASET", "asana"), \
+                patch.object(genie, "SPACES", {"genie_asana_revenue": "space"}), \
+                patch.object(claims_auth, "client_for", return_value=client) as authenticate:
+            tools = await genie.claim_tools("end-user-client", claims_auth.ADMIN_EMAIL, "user")
+        authenticate.assert_called_once_with("end-user-client", claims_auth.ADMIN_EMAIL, "user")
+        arguments = json.dumps({"question": "Show revenue"})
+        context = ToolContext(context=None, tool_name=tools[0].name, tool_call_id="test-call",
+                              tool_arguments=arguments)
+        self.assertIn("Access denied", await tools[0].on_invoke_tool(context, arguments))
+        client.genie.start_conversation_and_wait.assert_not_called()
+
     async def test_user_revenue_tool_is_denied_without_sending_a_question(self):
         client = Mock()
         tool = genie._claim_tool("genie_asana_revenue", "revenue-space", client, "user")

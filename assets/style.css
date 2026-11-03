@@ -80,7 +80,7 @@ body { margin: 0; background: var(--bg); color: var(--ink);
 .app-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
               max-width: 860px; margin: 0 auto; padding: 14px 16px 6px; gap: 10px; }
 .app-title { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
-.header-right { display: flex; align-items: center; gap: 10px; }
+.header-right { display: flex; flex-wrap: wrap; max-width: 100%; align-items: center; gap: 10px; }
 
 .memory-panel { max-width: 860px; margin: 8px auto; padding: 10px 16px;
                 display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px;

@@ -370,7 +370,7 @@ class MemorySession(SessionABC):
 
 async def run(message: str, session: SessionABC, user_client=None, model: str | None = None,
               on_event=None, model_router: str = "task_v2", actor_id: str | None = None,
-              actor_email: str | None = None):
+              actor_email: str | None = None, actor_role: str | None = None):
     """One turn. Returns (reply, model_route, genie_route) — `model_route` is the smart
     router's (model, rationale, kind) for this prompt, `kind` telling which router decided
     ("task_v2", "systemone", or "manual" when `model` was given); `genie_route` is the
@@ -384,7 +384,7 @@ async def run(message: str, session: SessionABC, user_client=None, model: str | 
 
     Genie tools use server-assigned claims in claims mode and user-scoped MCP otherwise.
     Both paths keep the router decision on the run context."""
-    tools = await genie.claim_tools(user_client, actor_email) if claims_auth.enabled() else []
+    tools = await genie.claim_tools(user_client, actor_email, actor_role) if claims_auth.enabled() else []
     items = await session.get_items()
     agent_input = message
     if actor_id and not items:
