@@ -133,6 +133,28 @@ def start_publisher() -> None:
     threading.Thread(target=run, daemon=True, name="memory-publisher").start()
 
 
+def list_memories(actor_id: str, limit: int = 50) -> list[dict]:
+    import memory
+
+    if not actor_id:
+        raise ValueError("Listing memories requires an authenticated actor")
+    if not source_path() or not memory.use_durable():
+        return []
+    limit = min(max(limit, 1), 100)
+
+    def load(conn):
+        return conn.execute(sql.SQL("""
+            SELECT memory_key, content, version, source_at FROM {}
+            WHERE actor_id = %s AND NOT deleted
+            ORDER BY source_at DESC, memory_key LIMIT %s
+        """).format(sql.Identifier(memory.SCHEMA, "long_term_memories")),
+                            (actor_id, limit)).fetchall()
+
+    return [{"key": key, "content": content, "version": version, "source_at": source_at}
+            for key, content, version, source_at in memory._run(load)
+            if not contains_secret(content)]
+
+
 def recall(actor_id: str, limit: int = 8) -> list[dict]:
     import memory
 

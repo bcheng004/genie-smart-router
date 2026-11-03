@@ -1,4 +1,7 @@
-"""Genie agents as MCP tools, called on behalf of the signed-in user.
+"""Genie tools using user-scoped MCP or server-assigned OAuth claims.
+
+With GENIE_CUSTOM_CLAIMS=true, Asana tools use the Genie Conversation API with
+claim-bearing service-principal tokens. Otherwise they retain the on-behalf-of flow below.
 
 Each Genie agent is a Databricks managed MCP server at
 https://<workspace-host>/api/2.0/mcp/genie/{genie_space_id}.
@@ -14,19 +17,39 @@ So Genie runs every query as the user, with their permissions. There is delibera
 fallback to the app's service principal: without a user token the Genie tools aren't offered.
 """
 import os
+import asyncio
+import json
+from datetime import timedelta
 
+from agents import function_tool
 from agents.mcp import MCPServerStreamableHttp
 from databricks.sdk import WorkspaceClient
 from contextlib import AsyncExitStack, asynccontextmanager
 
+import claims_auth
+
 # name -> space id, from the genie_space app resources in databricks.yml (value_from)
-SPACES = {name: sid for name, sid in {
-    "genie_tpch_orders": os.environ.get("TPCH_GENIE_SPACE_ID"),
-    "genie_nyc_taxi": os.environ.get("NYC_TAXI_GENIE_SPACE_ID"),
-}.items() if sid}
+DATASET = os.environ.get("GENIE_DATASET", "samples")
+SPACE_VARIABLES = ({
+    "genie_asana_revenue": "ASANA_REVENUE_GENIE_SPACE_ID",
+    "genie_asana_marketing": "ASANA_MARKETING_GENIE_SPACE_ID",
+} if DATASET == "asana" else {
+    "genie_tpch_orders": "TPCH_GENIE_SPACE_ID",
+    "genie_nyc_taxi": "NYC_TAXI_GENIE_SPACE_ID",
+})
+SPACES = {name: os.environ[variable] for name, variable in SPACE_VARIABLES.items()
+          if os.environ.get(variable)}
+CHAT_TOPICS = ("synthetic Asana revenue or marketing campaigns" if DATASET == "asana"
+               else "TPC-H orders or NYC taxi trips")
 
 # What each Genie agent covers (the router model picks one per turn from these)
 DESCRIPTIONS = {
+    "genie_asana_revenue": "Synthetic Asana-style SaaS revenue: subscription revenue, MRR, "
+                          "ARR, seats, plans, regions, acquisition channels, expansion and churn. "
+                          "Not real Asana data.",
+    "genie_asana_marketing": "Synthetic Asana-style marketing: campaign spend, channel performance, "
+                            "leads, conversion funnel, acquisition costs and attributed new MRR. "
+                            "Includes a paid-social lead-quality decline. Not real Asana data.",
     "genie_tpch_orders": "TPC-H B2B orders data: orders, revenue, customers, market segments, "
                          "nations/regions, line items, shipping modes and returns (1992-1998).",
     "genie_nyc_taxi": "NYC yellow taxi trips (Jan-Feb 2016): trip counts, fares, distances, "
@@ -41,6 +64,52 @@ def user_client(user_token: str | None) -> WorkspaceClient | None:
         profile = os.environ.get("DATABRICKS_CONFIG_PROFILE")
         return WorkspaceClient(profile=profile) if profile else None
     return WorkspaceClient(token=user_token, auth_type="pat") if user_token else None
+
+
+def query_with_claim(client, space_id: str, question: str) -> str:
+    """Use a new conversation per invocation; no shared-principal conversation IDs are accepted."""
+    message = client.genie.start_conversation_and_wait(
+        space_id, question, timeout=timedelta(minutes=5))
+    output = []
+    for attachment in message.attachments or []:
+        if attachment.text and attachment.text.content:
+            output.append({"text": attachment.text.content})
+        if attachment.query:
+            result = client.genie.get_message_attachment_query_result(
+                space_id, message.conversation_id, message.id, attachment.attachment_id)
+            statement = result.statement_response
+            if not statement or not statement.status or statement.status.state.value != "SUCCEEDED":
+                raise RuntimeError("Claim-aware Genie query did not complete successfully")
+            result_data = statement.as_dict()
+            if result_data.get("result", {}).get("data_array"):
+                rows = result_data["result"]["data_array"]
+                result_data["result"]["data_array"] = rows[:100]
+                result_data["truncated_for_chat"] = len(rows) > 100
+            output.append({"sql": attachment.query.query, "result": result_data})
+    return json.dumps(output)
+
+
+def _claim_tool(name: str, space_id: str, client, role: str):
+    async def allowed(context, agent):
+        decision = await context.context.decide()
+        return decision is None or decision["choice"] == name
+
+    @function_tool(name_override=name, description_override=DESCRIPTIONS[name], is_enabled=allowed)
+    async def query(question: str) -> str:
+        """Ask a self-contained question about the synthetic dataset."""
+        if name == "genie_asana_revenue" and role != "admin":
+            return "Access denied: the user role cannot read revenue. Do not infer or invent revenue values."
+        return await asyncio.to_thread(query_with_claim, client, space_id, question)
+
+    return query
+
+
+async def claim_tools(end_user_client, email: str):
+    if DATASET != "asana":
+        raise ValueError("Custom revenue claims require the Asana dataset")
+    client = await asyncio.to_thread(claims_auth.client_for, end_user_client, email)
+    return [_claim_tool(name, space_id, client, claims_auth.role_for(email))
+            for name, space_id in SPACES.items()]
 
 
 @asynccontextmanager

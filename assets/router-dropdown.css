@@ -1,17 +1,21 @@
-/* the smart-router picker: a white pill with black text. Dash 4's dcc.Dropdown is a native
-   Radix dropdown — trigger button plus a portal menu at body level (the old react-select
-   .Select-* classes are gone) — and this app has exactly one dropdown, so the dash-dropdown
-   parts are styled globally. Black text is forced in every state for readability. */
-.router-select-wrap { width: 250px; }
-.router-select.dash-dropdown { background: #fff; color: #000;
+.router-select-wrap { width: 350px; max-width: 100%; flex-shrink: 0; }
+.router-select.dash-dropdown { background: #fff; color: #b54708;
                                border: 1px solid #d9dfe7; border-radius: 999px;
                                height: 30px; padding: 0 13px; font-size: 12.5px; }
 .dash-dropdown-content { background: #fff; border: 1px solid #d9dfe7; border-radius: 10px;
                          box-shadow: 0 4px 14px rgba(27, 39, 51, .12); }
-.dash-dropdown-option { color: #000; font-size: 12.5px; padding: 6px 12px; }
+.dash-dropdown-option { color: #b54708; font-size: 12.5px; padding: 6px 12px; }
 .dash-dropdown-option:hover { background: #f0f4ff; }
-/* Dash paints hovered/focused options (Radix keeps a hidden checkbox focused inside the
-   selected one while the menu is open) with its --Dash-Fill-Interactive-Strong purple at
-   higher specificity than the class rule above — force black in every state */
-.dash-dropdown-option:hover, .dash-dropdown-option:focus-within { color: #000 !important; }
+.router-select .dash-dropdown-value,
+.dash-dropdown-content .dash-dropdown-option,
+.dash-dropdown-content .dash-options-list-option,
+.dash-dropdown-content .dash-options-list-option-text,
+.router-select .Select-value-label,
+.router-select .Select-option,
+.router-select .VirtualizedSelectOption,
+.router-select .Select-input > input { color: #b54708 !important; }
+.router-select .Select-value-label,
+.router-select .Select-option,
+.router-select .VirtualizedSelectOption,
+.dash-dropdown-option { white-space: nowrap; }
 .dash-dropdown-option.selected { background: #f0f4ff; font-weight: 600; }

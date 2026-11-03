@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create (or update) two Genie agents over Databricks sample datasets.
+"""Create (or update) two Genie agents over sample or synthetic Asana datasets.
 
   * "TPC-H Order Analytics" — samples.tpch customer / orders / lineitem / nation / region
   * "NYC Taxi Trips"        — samples.nyctaxi.trips
@@ -13,6 +13,7 @@ Usage:
     uv run create-genie-agents --profile <profile> --dry-run    # print payloads
     uv run create-genie-agents --profile <profile> --validate   # check the SQL
     uv run create-genie-agents --profile <profile>              # create/update
+    uv run create-genie-agents --profile <profile> --dataset asana --catalog <catalog> --schema <schema>
 """
 import argparse
 import json
@@ -345,10 +346,10 @@ def build_serialized_space(agent: dict) -> dict:
     }
 
 
-def validate(w: WorkspaceClient, warehouse_id: str) -> bool:
+def validate(w: WorkspaceClient, warehouse_id: str, agents=None) -> bool:
     """Read-only check: run every example SQL (LIMIT 5) and every snippet against its table."""
     checks = []
-    for agent in AGENTS:
+    for agent in AGENTS if agents is None else agents:
         for q, sql in agent["examples"]:
             checks.append((f"{agent['title']} · example · {q}",
                            f"SELECT * FROM ({sql}) LIMIT 5"))
@@ -362,6 +363,11 @@ def validate(w: WorkspaceClient, warehouse_id: str) -> bool:
     for label, sql in checks:
         r = w.statement_execution.execute_statement(statement=sql, warehouse_id=warehouse_id,
                                                     wait_timeout="50s")
+        deadline = time.monotonic() + 300
+        while r.status and r.status.state in (StatementState.PENDING, StatementState.RUNNING) \
+                and time.monotonic() < deadline:
+            time.sleep(2)
+            r = w.statement_execution.get_statement(r.statement_id)
         state = r.status.state if r.status else None
         # realtime warehouses answer in ARROW_STREAM, which this SDK doesn't inline into
         # data_array; row_count still comes from the server, so fall back to it
@@ -409,7 +415,8 @@ def find_space(w: WorkspaceClient, title: str):
             return None
 
 
-def upsert_bundle_resources(spaces: list[tuple[str, str, str]]) -> None:
+def upsert_bundle_resources(spaces: list[tuple[str, str, str]], dataset: str = "samples",
+                            claim_views: bool = False) -> None:
     """Add/replace `genie_space` app resources (CAN_RUN) in databricks.yml, keyed by resource
     name; other resources are left untouched."""
     from ruamel.yaml import YAML
@@ -425,6 +432,10 @@ def upsert_bundle_resources(spaces: list[tuple[str, str, str]]) -> None:
         return
     app_key = next(iter(apps))
     resources = apps[app_key].setdefault("resources", [])
+    selected = {name for name, _, _ in spaces}
+    managed = {"tpch_orders_genie", "nyc_taxi_genie", "asana_revenue_genie", "asana_marketing_genie"}
+    resources[:] = [resource for resource in resources
+                    if resource.get("name") not in managed or resource.get("name") in selected]
     for name, title, space_id in spaces:
         entry = CommentedMap()
         entry["name"] = name
@@ -436,6 +447,20 @@ def upsert_bundle_resources(spaces: list[tuple[str, str, str]]) -> None:
         else:
             resources[idx] = entry
         print(f"  -> databricks.yml: app '{app_key}' resource {name!r} -> {space_id}")
+    cfg.setdefault("variables", {}).setdefault("genie_dataset", CommentedMap())["default"] = dataset
+    environment = apps[app_key].setdefault("config", {}).setdefault("env", [])
+    variable_names = {"TPCH_GENIE_SPACE_ID", "NYC_TAXI_GENIE_SPACE_ID",
+                      "ASANA_REVENUE_GENIE_SPACE_ID", "ASANA_MARKETING_GENIE_SPACE_ID", "GENIE_DATASET",
+                      "GENIE_CUSTOM_CLAIMS"}
+    environment[:] = [entry for entry in environment if entry.get("name") not in variable_names]
+    environment.append(CommentedMap([("name", "GENIE_DATASET"), ("value", "${var.genie_dataset}")]))
+    environment.append(CommentedMap([("name", "GENIE_CUSTOM_CLAIMS"),
+                                     ("value", "true" if claim_views else "false")]))
+    bindings = ({"ASANA_REVENUE_GENIE_SPACE_ID": "asana_revenue_genie",
+                 "ASANA_MARKETING_GENIE_SPACE_ID": "asana_marketing_genie"} if dataset == "asana" else
+                {"TPCH_GENIE_SPACE_ID": "tpch_orders_genie", "NYC_TAXI_GENIE_SPACE_ID": "nyc_taxi_genie"})
+    for name, resource in bindings.items():
+        environment.append(CommentedMap([("name", name), ("value_from", resource)]))
     with DATABRICKS_YML.open("w") as f:
         yaml.dump(cfg, f)
 
@@ -455,10 +480,22 @@ def main() -> None:
                         help="Run the example SQL and snippets read-only; change nothing")
     parser.add_argument("--no-bundle", action="store_true",
                         help="Don't add genie_space resources to databricks.yml")
+    parser.add_argument("--dataset", choices=["samples", "asana"], default="samples")
+    parser.add_argument("--catalog", help="Required for the synthetic Asana dataset")
+    parser.add_argument("--schema", help="Required for the synthetic Asana dataset")
+    parser.add_argument("--claim-views", action="store_true", help="Use claim-filtered Asana views and separate Genie spaces")
     args = parser.parse_args()
+    if args.claim_views and args.dataset != "asana":
+        parser.error("--claim-views requires --dataset asana")
+    agents = AGENTS
+    if args.dataset == "asana":
+        if not args.catalog or not args.schema:
+            parser.error("--dataset asana requires --catalog and --schema")
+        from scripts.asana_agents import build_asana_agents
+        agents = build_asana_agents(args.catalog, args.schema, _col, claim_views=args.claim_views)
 
     if args.dry_run:
-        for agent in AGENTS:
+        for agent in agents:
             print(f"# {agent['title']}\n# {agent['description']}")
             print(json.dumps(build_serialized_space(agent), indent=2))
         return
@@ -471,8 +508,15 @@ def main() -> None:
         sys.exit("Error: could not resolve a SQL warehouse; pass --warehouse-id")
     print(f"Workspace: {w.config.host}  warehouse: {warehouse_id}")
 
-    if args.validate:
-        sys.exit(0 if validate(w, warehouse_id) else 1)
+    validation_client = w
+    if args.claim_views:
+        from claims_auth import claim_token
+        validation_client = WorkspaceClient(host=w.config.host, auth_type="pat", token=claim_token(
+            w.config.host, os.environ.get("REVENUE_CLAIMS_CLIENT_ID", ""),
+            os.environ.get("REVENUE_CLAIMS_CLIENT_SECRET", ""), "admin"))
+    valid = validate(validation_client, warehouse_id, agents)
+    if args.validate or not valid:
+        sys.exit(0 if valid else 1)
 
     genie_warehouse_id = resolve_genie_warehouse(w, args.warehouse_id)
     if not genie_warehouse_id:
@@ -481,7 +525,7 @@ def main() -> None:
     print(f"Genie warehouse: {genie_warehouse_id}")
 
     created = []
-    for agent in AGENTS:
+    for agent in agents:
         payload = json.dumps(build_serialized_space(agent))
         existing = find_space(w, agent["title"])
         if existing:
@@ -499,7 +543,7 @@ def main() -> None:
         created.append((agent["key"], agent["title"], space.space_id))
 
     if not args.no_bundle:
-        upsert_bundle_resources(created)
+        upsert_bundle_resources(created, args.dataset, claim_views=args.claim_views)
 
 
 if __name__ == "__main__":

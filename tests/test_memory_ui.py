@@ -35,6 +35,23 @@ class MemoryUiTests(unittest.TestCase):
         self.live.start()
         self.addCleanup(self.live.stop)
         self.app.memory_actions._jobs.clear()
+        for target, value in [("long_term_memory.source_path", "/Volumes/demo/memory/events"),
+                              ("memory.use_durable", True)]:
+            configured = patch(target, return_value=value)
+            configured.start()
+            self.addCleanup(configured.stop)
+        self.listing = patch("long_term_memory.list_memories", return_value=[])
+        self.list_mock = self.listing.start()
+        self.addCleanup(self.listing.stop)
+
+    def test_deployed_identity_never_falls_back_to_dev_admin(self):
+        with patch.dict(os.environ, {"DATABRICKS_APP_NAME": "router",
+                                    "DEV_USER": "bo.cheng@databricks.com"}), \
+                self.app.app.server.test_request_context("/"):
+            self.assertEqual(self.app._user_email(), "local-user")
+        with self.app.app.server.test_request_context(
+                "/", headers={"X-Forwarded-Email": "bo.cheng@databricks.com"}):
+            self.assertEqual(self.app._user_email(), "bo.cheng@databricks.com")
 
     def test_only_confirmation_starts_selected_conversation(self):
         with patch.object(self.app.dash, "ctx", SimpleNamespace(triggered_id="memory-confirm")):
@@ -46,7 +63,8 @@ class MemoryUiTests(unittest.TestCase):
             "/_dash-layout", headers={"X-Forwarded-Email": "alice"})
         self.assertEqual(response.status_code, 200)
         layout = response.get_data(as_text=True)
-        for label in ["distill-memory", "Distill memory", "memory-confirm", "memory-status"]:
+        for label in ["distill-memory", "Distill memory", "memory-confirm", "memory-status",
+                      "Long-term memory", "long-term-memory-list", "refresh-long-term-memory"]:
             self.assertIn(label, layout)
         self.start_mock.assert_not_called()
 
@@ -68,6 +86,55 @@ class MemoryUiTests(unittest.TestCase):
         with patch.object(self.app.dash, "ctx", SimpleNamespace(triggered_id=None)):
             _, disabled, _ = self.app._memory_progress(0, 0, [], 0)
         self.assertTrue(disabled)
+
+    def test_initial_memory_load_is_scoped_to_signed_in_actor(self):
+        with patch.object(self.app.dash, "ctx", SimpleNamespace(triggered_id=None)):
+            body, running = self.app._refresh_long_term_memory(0, True, False)
+        self.list_mock.assert_called_once_with("alice")
+        self.assertFalse(running)
+        self.assertIn("No saved facts yet", body.children)
+
+    def test_distillation_completion_refreshes_the_panel(self):
+        with patch.object(self.app.dash, "ctx", SimpleNamespace(triggered_id="memory-tick")):
+            self.app._refresh_long_term_memory(0, True, True)
+        self.list_mock.assert_called_once_with("alice")
+
+    def test_initial_upstream_interval_update_still_loads_memories(self):
+        with patch.object(self.app.dash, "ctx", SimpleNamespace(triggered_id="memory-tick")):
+            body, running = self.app._refresh_long_term_memory(0, True, None)
+        self.list_mock.assert_called_once_with("alice")
+        self.assertFalse(running)
+        self.assertIn("No saved facts yet", body.children)
+
+    def test_active_or_unchanged_idle_poll_does_not_query_storage(self):
+        for disabled, was_running in [(False, False), (False, True), (True, False)]:
+            with patch.object(self.app.dash, "ctx", SimpleNamespace(triggered_id="memory-tick")):
+                body, running = self.app._refresh_long_term_memory(0, disabled, was_running)
+            self.assertIs(body, self.app.dash.no_update)
+            self.assertEqual(running, not disabled)
+        self.list_mock.assert_not_called()
+
+    def test_manual_refresh_loads_current_facts_as_plain_text(self):
+        self.list_mock.return_value = [{"key": "preferences.currency", "content": "Use <USD>.",
+                                        "version": 2, "source_at": 100.0}]
+        with patch.object(self.app.dash, "ctx", SimpleNamespace(triggered_id="refresh-long-term-memory")):
+            cards, _ = self.app._refresh_long_term_memory(1, False, True)
+        self.assertEqual(cards[0].children[1].children, "Use <USD>.")
+        self.assertIn("Version 2", cards[0].children[2].children)
+        self.list_mock.assert_called_once_with("alice")
+
+    def test_storage_error_has_retry_message_without_backend_details(self):
+        self.list_mock.side_effect = RuntimeError("private backend detail")
+        body = self.app._long_term_memory_view("alice")
+        self.assertEqual(body.role, "alert")
+        self.assertIn("Refresh", body.children)
+        self.assertNotIn("private backend detail", body.children)
+
+    def test_unconfigured_storage_is_not_reported_as_empty_memory(self):
+        with patch("memory.use_durable", return_value=False):
+            body = self.app._long_term_memory_view("alice")
+        self.assertIn("not available", body.children)
+        self.list_mock.assert_not_called()
 
 
 if __name__ == "__main__":

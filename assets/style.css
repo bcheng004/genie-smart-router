@@ -15,6 +15,19 @@ body { margin: 0; background: var(--bg); color: var(--ink);
 /* shell: chats sidebar on the left, the chat column beside it */
 .app-shell { display: flex; min-height: 100vh; }
 .main { flex: 1; min-width: 0; }
+.long-term-memory-sidebar { flex: 0 0 300px; box-sizing: border-box;
+    border-left: 1px solid var(--line); background: var(--card); padding: 18px 14px;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.long-term-memory-header { display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 10px; }
+.long-term-memory-header h4 { margin: 0; font-size: 16px; font-weight: 650; }
+.long-term-memory-header .memory-btn { font-size: 12px; padding: 5px 8px; }
+.long-term-memory-note { display: block; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.long-term-memory-card { border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg); padding: 12px; margin: 12px 0; overflow-wrap: anywhere; }
+.long-term-memory-key { color: var(--route-ink); font-size: 11.5px; font-weight: 600; }
+.long-term-memory-content { margin: 7px 0; color: var(--ink); font-size: 13px;
+    line-height: 1.55; white-space: pre-wrap; }
 
 .sidebar { flex: 0 0 260px; box-sizing: border-box; border-right: 1px solid var(--line);
            background: var(--card); padding: 14px 10px; display: flex; flex-direction: column;
@@ -43,8 +56,16 @@ body { margin: 0; background: var(--bg); color: var(--ink);
 .chat-empty { margin: 18vh auto 0; max-width: 420px; text-align: center; color: var(--muted);
               font-size: 14px; }
 
+@media (max-width: 1100px) {
+    .app-shell { flex-wrap: wrap; }
+    .main { flex-basis: calc(100% - 260px); }
+    .long-term-memory-sidebar { flex: 1 0 100%; position: static; height: auto;
+        border-left: none; border-top: 1px solid var(--line); }
+}
+
 @media (max-width: 720px) {
     .app-shell { flex-direction: column; }
+    .main { flex-basis: auto; width: 100%; }
     .app-header { flex-wrap: wrap; }
     .sidebar { position: static; flex: none; width: auto; height: auto; flex-direction: row;
                align-items: center; gap: 6px; overflow-x: auto; padding: 10px 12px; }
@@ -53,9 +74,10 @@ body { margin: 0; background: var(--bg); color: var(--ink);
     .branch-btn { opacity: .7; }
     .session-time { display: none; }
     .router-select-wrap { width: 100%; }
+    .header-right { flex-wrap: wrap; max-width: 100%; }
 }
 
-.app-header { display: flex; align-items: center; justify-content: space-between;
+.app-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
               max-width: 860px; margin: 0 auto; padding: 14px 16px 6px; gap: 10px; }
 .app-title { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 .header-right { display: flex; align-items: center; gap: 10px; }

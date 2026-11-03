@@ -11,6 +11,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
 import dash
 import dash_bootstrap_components as dbc
@@ -22,6 +23,7 @@ import genie
 import long_term_memory
 import memory
 import memory_actions
+import claims_auth
 
 _log = logging.getLogger(__name__)
 
@@ -35,14 +37,19 @@ def _on_loop(coro):
     return asyncio.run_coroutine_threadsafe(coro, _loop).result()
 
 
-def _user() -> str:
+def _user_email() -> str:
     """The signed-in user (forwarded by Databricks Apps; DEV_USER locally) — scopes the
     in-memory chats."""
     try:
-        return request.headers.get("X-Forwarded-Email") or os.environ.get(
-            "DEV_USER", "local-user")
+        email = request.headers.get("X-Forwarded-Email")
+        return email or ("local-user" if os.environ.get("DATABRICKS_APP_NAME") else
+                         os.environ.get("DEV_USER", "local-user"))
     except RuntimeError:  # no request context (Dash validates the layout at import)
         return "local-user"
+
+
+def _user() -> str:
+    return claims_auth.memory_actor(_user_email())
 
 
 def _user_token() -> str | None:
@@ -186,7 +193,7 @@ def _chat_view(user: str) -> list:
     events = _chat_events(user)
     if not events:
         return [html.Div([html.I(className="bi bi-chat-left-dots me-2"),
-                          "Start a chat — ask about TPC-H orders or NYC taxi trips."],
+                          f"Start a chat — ask about {genie.CHAT_TOPICS}."],
                          className="chat-empty")]
     return _transcript(events)
 
@@ -237,6 +244,7 @@ def _layout():
         dcc.Interval(id="tick", interval=1000, disabled=not (live and not live.get("done"))),
         dcc.Interval(id="memory-tick", interval=2000,
                      disabled=not memory_actions.status(user)["running"]),
+        dcc.Store(id="long-term-memory-was-running", data=None),
         dcc.ConfirmDialog(id="memory-confirm", message=(
             "Publish this conversation's user messages and distill durable facts? "
             "Source messages, evidence and extracted facts are retained. "
@@ -254,6 +262,10 @@ def _layout():
                                    "Smart routing"], className="route-badge",
                                   title="Each turn is routed: a model router picks the chat "
                                         "model, and the openjev router picks the Genie agent"),
+                        html.Span(f"Revenue: {claims_auth.role_for(_user_email())}",
+                                  className="route-badge",
+                                  style={} if claims_auth.enabled() else {"display": "none"},
+                                  title="Revenue access is assigned on the server, not selected here"),
                         html.Div(dcc.Dropdown(
                             id="model-router", clearable=False, className="router-select",
                             options=[
@@ -276,17 +288,64 @@ def _layout():
                 ], className="memory-panel"),
                 html.Div(id="chat", className="chat", children=_chat_view(user)),
                 html.Div([
-                    dcc.Input(id="msg", placeholder="Ask about TPC-H orders or NYC taxi trips…",
+                    dcc.Input(id="msg", placeholder=f"Ask about {genie.CHAT_TOPICS}…",
                               className="msg-input", type="text", debounce=True, n_submit=0),
                     html.Button(html.I(className="bi bi-send-fill"), id="send", n_clicks=0,
                                 className="send-btn"),
                 ], className="input-bar"),
             ]),
+            html.Aside([
+                html.Div([
+                    html.H4("Long-term memory", id="long-term-memory-heading"),
+                    html.Button("Refresh", id="refresh-long-term-memory", n_clicks=0,
+                                className="memory-btn", type="button"),
+                ], className="long-term-memory-header"),
+                html.P("Saved facts for your account · recalled in new chats",
+                       className="long-term-memory-note"),
+                dcc.Loading(html.Div("Loading saved memories…", id="long-term-memory-list",
+                                     role="status", **{"aria-live": "polite"}), type="circle"),
+                html.Small("Source: Lakebase · most recent 50 facts · refreshes after distillation",
+                           className="long-term-memory-note"),
+            ], className="long-term-memory-sidebar",
+               **{"aria-labelledby": "long-term-memory-heading"}),
         ]),
     ])
 
 
 app.layout = _layout
+
+
+def _long_term_memory_view(user: str):
+    try:
+        if not long_term_memory.source_path() or not memory.use_durable():
+            return html.P("Long-term memory storage is not available.", className="sidebar-empty")
+        memories = long_term_memory.list_memories(user)
+    except Exception:
+        _log.exception("Could not load long-term memory sidebar")
+        return html.P("Could not load saved memories. Use Refresh to try again.",
+                      className="sidebar-empty", role="alert")
+    if not memories:
+        return html.P("No saved facts yet. Use Distill memory on a chat to save durable facts.",
+                      className="sidebar-empty")
+    return [html.Article([
+        html.Div(fact["key"], className="long-term-memory-key"),
+        html.P(fact["content"], className="long-term-memory-content"),
+        html.Small(f"Version {fact['version']} · source "
+                   + datetime.fromtimestamp(fact["source_at"], timezone.utc).strftime("%b %d, %Y %H:%M UTC"),
+                   className="long-term-memory-note"),
+    ], className="long-term-memory-card") for fact in memories]
+
+
+@app.callback(Output("long-term-memory-list", "children"),
+              Output("long-term-memory-was-running", "data"),
+              Input("refresh-long-term-memory", "n_clicks"), Input("memory-tick", "disabled"),
+              State("long-term-memory-was-running", "data"))
+def _refresh_long_term_memory(clicks, interval_disabled, was_running):
+    running = not interval_disabled
+    if (dash.ctx.triggered_id == "memory-tick" and was_running is not None
+            and (running or not was_running)):
+        return dash.no_update, running
+    return _long_term_memory_view(_user()), running
 
 
 @app.callback(Output("memory-confirm", "displayed"), Input("distill-memory", "n_clicks"),
@@ -408,6 +467,7 @@ def _execute_turn(live: dict, text: str, token: str | None):
         reply, model_route, _ = _on_loop(agent.run(
             text, session=live["session"], user_client=client,
             actor_id=live["actor_id"],
+            actor_email=live.get("actor_email"),
             model_router=live.get("router") or "task_v2",
             on_event=lambda ev: _live_event(live, ev)))
         _live_event(live, {"kind": "model", "model": model_route[0], "why": model_route[1],
@@ -486,7 +546,7 @@ def on_message(_send, _submit, _tick, _new, _items, _branch, router_sel, text):
         data["active"] = rec["id"]
 
     token = _user_token()
-    new_live = {"sid": rec["id"], "actor_id": user,
+    new_live = {"sid": rec["id"], "actor_id": user, "actor_email": _user_email(),
                 "events": [{"kind": "user", "text": text.strip(),
                             "event_id": uuid.uuid4().hex, "created": time.time()}],
                 "done": False, "error": None, "session": rec["session"],

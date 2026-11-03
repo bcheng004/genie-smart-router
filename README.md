@@ -57,9 +57,61 @@ talking to two Genie agents as MCP servers, with two routing decisions made per 
   env vars and a short-lived OAuth token the app mints itself (`generate_database_credential`),
   cached 30 min of its 1 h validity. When the `postgres` app resource isn't attached, or the
   branch can't be reached at boot, the app falls back to in-memory chats
-- `scripts/create_genie_agents.py` — `uv run create-genie-agents --profile <p>` creates/updates
-  the TPC-H and NYC Taxi Genie agents (over `samples.tpch` / `samples.nyctaxi`) and adds them as
-  app resources in `databricks.yml`
+- `scripts/create_genie_agents.py` creates/updates two Genie agents and configures their app
+  resources, environment bindings and routing mode. `--dataset samples` retains the original
+  TPC-H / NYC Taxi setup; `--dataset asana --catalog <catalog> --schema <schema>` uses the
+  synthetic Asana revenue and marketing tables. Every example SQL and snippet is validated
+  before creating or updating agents. Existing agents are matched by title on reruns.
+
+## Long-Term Memory Panel
+
+The right-hand **Long-term memory** panel lists the signed-in user's most recent 50 active
+saved facts, with their keys, versions and source timestamps. Refresh manually or finish a
+distillation to reload it. Facts are displayed as plain text, with actor-scoped queries and
+secret filtering; other users' facts and deleted memories are never included. On smaller
+screens the panel moves below the chat. Storage failures show a retry message instead of
+being mistaken for an empty memory store.
+
+## Synthetic Asana Demo
+
+This is **fictional Asana-style SaaS data**, not Asana financial results, actual customers,
+real prices or forecasts. The approved deployment uses `workshop_guy_catalog.asana_demo`
+with the `mlflow-workshop` profile. The catalog's existing access policy applies; no real
+customer information should be loaded into this demo schema.
+
+- `revenue`: 120,000 account-month snapshots for 10,000 fictional accounts, November 2025
+  through October 2026. Includes invented plans, seats, regions, acquisition campaigns,
+  subscription revenue, opening/closing MRR, ARR, expansion and churn.
+- `marketing`: 109,500 campaign-day records for 300 campaigns over the same period. Includes
+  spend, impressions, clicks, leads, qualified leads, opportunities, acquired accounts and
+  attributed new MRR. A simulated Paid Social lead-quality decline increases spending and
+  acquisition costs in July–August 2026, shifting some signups to September–October.
+- MRR/ARR and seats are snapshots: aggregate across accounts within a month, not across
+  months. Synthetic subscription revenue equals closing MRR without proration and is not
+  GAAP recognized revenue. Marketing conversions and attributed MRR reconcile to revenue's
+  acquisition cohorts. Never join these fact tables without first aggregating to the same
+  campaign/month grain. The MRR-to-spend ratio is not realized ROAS or lifetime-value ROI.
+
+Generate using an isolated Python 3.12 environment and Databricks Connect serverless:
+
+```bash
+uv run --no-project --python 3.12 \
+  --with 'databricks-connect>=17.3,<17.4' --with faker \
+  --with 'pandas>=2.2,<3' --with 'pyarrow>=15,<20' \
+  python scripts/generate_asana_data.py \
+  --profile mlflow-workshop --catalog workshop_guy_catalog --schema asana_demo
+
+uv run create-genie-agents --profile mlflow-workshop \
+  --dataset asana --catalog workshop_guy_catalog --schema asana_demo \
+  --warehouse-id 9bbc027402111984
+```
+
+The generator creates the schema if missing and refuses to replace existing tables unless
+`--overwrite` is explicitly supplied. IDs, names and distributions are seeded for reproducibility.
+Generation libraries are local tooling, not app runtime dependencies. `--dry-run` prints Genie
+payloads without writes; `--validate` checks only SQL. Switching datasets removes only the
+other mode's app bindings, preserving Lakebase and memory-pipeline resources; existing Genie
+spaces and conversation history are not deleted. Start a new chat after switching datasets.
 
 ```bash
 databricks bundle deploy -t dev -p <profile>
@@ -76,6 +128,80 @@ export LAKEBASE_ENDPOINT=projects/genie-smart-router-memory/branches/smart-route
 export LAKEBASE_HOST=ep-bitter-bird-d21lj117.database.us-east-1.cloud.databricks.com
 DATABRICKS_CONFIG_PROFILE=<profile> DEV_USER=me@example.com uv run python app.py
 ```
+
+## Revenue custom-claim view
+
+Keep the existing catalog and base table, and expose an admin-only dynamic view:
+
+```sql
+CREATE VIEW workshop_guy_catalog.asana_demo.revenue_by_claim AS
+SELECT * FROM workshop_guy_catalog.asana_demo.revenue
+WHERE current_oauth_custom_identity_claim() = 'admin';
+```
+
+`custom_claim=admin` returns revenue rows; `user`, missing (`NULL`), empty and unknown claims
+return no rows. The claim belongs to the caller's OAuth token, not a column in the data.
+The setup command previews SQL by default. Add `--apply` to create the view; it refuses to
+replace an existing object. It does not change base tables or grants.
+
+```bash
+.venv/bin/python -m scripts.setup_revenue_claims --profile mlflow-workshop \
+  --warehouse-id 9bbc027402111984 --catalog workshop_guy_catalog --schema asana_demo --apply
+.venv/bin/python -m scripts.setup_revenue_claims --profile mlflow-workshop \
+  --warehouse-id 9bbc027402111984 --catalog workshop_guy_catalog --schema asana_demo --marketing --apply
+```
+
+For live admin/user/absent/unknown-claim verification, supply an explicitly chosen service
+principal's OAuth client ID and secret through `REVENUE_CLAIMS_CLIENT_ID` and
+`REVENUE_CLAIMS_CLIENT_SECRET`, then run the same command with `--verify-claims` **instead of**
+`--apply`. The principal needs warehouse `CAN_USE`, catalog/schema usage and `SELECT` on
+the view. Credentials and issued tokens are never printed by the verifier. This operator-only
+utility intentionally mints test roles; it is not an application endpoint or a user role picker.
+Add `--marketing` during verification to also check that `marketing_by_claim` keeps marketing
+rows visible but masks `attributed_new_mrr_usd` for every non-admin claim.
+
+The Asana app enables `GENIE_CUSTOM_CLAIMS=true`. Only the verified signed-in identity
+`bo.cheng@databricks.com` receives the `admin` claim; every other identity receives `user`.
+The app checks the forwarded email against the user token's current-user identity before
+minting an OAuth token with its auto-injected `DATABRICKS_CLIENT_ID` and
+`DATABRICKS_CLIENT_SECRET`. Missing identities, credentials or token errors fail closed;
+there is no unclaimed-token fallback and no browser-controlled role selector.
+
+In this mode the tools use the documented Genie Conversation API rather than relying on
+undocumented claim propagation through MCP. Each tool invocation starts a new conversation,
+and the app never accepts an externally supplied Genie conversation ID. Model/tool routing
+remains enabled. Marketing uses `marketing_by_claim`, which masks revenue-derived new MRR
+for non-admins. The revenue tool additionally denies non-admin calls without querying Genie.
+
+To create the two separate claims-aware Genie spaces and update the bundle bindings, provide
+the operator verification credentials above and run:
+
+```bash
+.venv/bin/python -m scripts.create_genie_agents --profile mlflow-workshop \
+  --dataset asana --catalog workshop_guy_catalog --schema asana_demo \
+  --warehouse-id 9bbc027402111984 --claim-views
+```
+
+This validates examples with an admin-claim token. It does not modify the original raw-table
+Genie spaces. Omitting `--claim-views` returns to the original on-behalf-of mode and spaces.
+For local claim-aware app development, set the explicit profile, `DEV_USER` to that profile's
+real signed-in email, `GENIE_DATASET=asana`, `GENIE_CUSTOM_CLAIMS=true`, both claims-space IDs,
+and the operator verification credentials. A fake `DEV_USER` cannot impersonate the admin.
+
+Chats, tool outputs and long-term memories use a new actor namespace including the email,
+policy version and server-assigned role. Old memories and chats remain stored unchanged but
+are not automatically loaded into claims-mode sessions. Role changes cannot replay another
+role's history. Start a fresh chat after deploying this mode.
+
+**Boundary:** the view protects queries against the view, not queries against `revenue`.
+The shared catalog currently grants `account users` broad inherited privileges, including to
+the app principal. Those grants remain unchanged, so this is not a restriction on all revenue
+access. Do not advertise it as such. A principal with base-table privileges can still query
+those tables outside the configured views. The underlying marketing table is unchanged too.
+The linked Databricks guide recommends ABAC for Genie authoring because an author without
+a claim sees no rows in a dynamic view. This setup follows the requested view approach;
+author and validate these spaces through the API with an admin-claim token.
+See [OAuth custom identity claims](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-custom-identity-claims).
 
 ## Long-term memory pipeline
 

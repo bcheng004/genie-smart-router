@@ -117,6 +117,25 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(long_term_memory.recall("alice"), [])
             self.client.files.upload.assert_not_called()
 
+    def test_sidebar_listing_is_actor_scoped_bounded_and_excludes_deleted(self):
+        self.connection.execute.return_value.fetchall.return_value = [("currency", "Use USD.", 2, 100.0)]
+        self.assertEqual(long_term_memory.list_memories("alice", limit=1000), [
+            {"key": "currency", "content": "Use USD.", "version": 2, "source_at": 100.0}])
+        query, params = self.connection.execute.call_args.args
+        self.assertEqual(params, ("alice", 100))
+        self.assertIn("actor_id = %s AND NOT deleted", query.as_string())
+
+    def test_sidebar_listing_requires_actor_and_filters_secrets(self):
+        with self.assertRaises(ValueError):
+            long_term_memory.list_memories("")
+        self.connection.execute.return_value.fetchall.return_value = [("bad", "api_key=secret", 1, 100.0)]
+        self.assertEqual(long_term_memory.list_memories("alice"), [])
+
+    def test_sidebar_listing_propagates_storage_errors_for_error_state(self):
+        with patch("memory._run", side_effect=RuntimeError("storage unavailable")):
+            with self.assertRaises(RuntimeError):
+                long_term_memory.list_memories("alice")
+
     def test_invalid_volume_paths_are_rejected(self):
         for path in ["/tmp/events", "/Volumes/catalog/schema/volume/events",
                      "/Volumes//schema/volume", "/Volumes/catalog/../volume"]:
