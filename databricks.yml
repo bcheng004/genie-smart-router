@@ -3,6 +3,16 @@ bundle:
   engine: direct
 
 variables:
+  app_name:
+    description: Workspace-global name of the router app
+    default: genie-router-${workspace.current_user.domain_friendly_name}
+  memory_volume:
+    description: Unity Catalog volume containing manually selected memory events
+  memory_pipeline_id:
+    description: Pipeline to run when the signed-in user clicks Distill memory
+  shared_memory_storage:
+    description: Show an explicit shared-storage warning before publication
+    default: "false"
   model:
     description: Unity Catalog model service the agent calls through Unity AI 
       Gateway
@@ -23,14 +33,13 @@ sync:
     # pyproject.toml / uv.lock point at the internal PyPI proxy, which Apps can't reach —
     # the app installs from requirements.txt instead.
     - pyproject.toml
-    - uv.lock
     - scripts/**
     - README.md
 
 resources:
   apps:
     genie_smart_router:
-      name: "genie-smart-router"
+      name: ${var.app_name}
       description: "Genie agents with AI Gateway smart routing and the openjev Genie
         router"
       source_code_path: ./
@@ -56,8 +65,21 @@ resources:
           # path; the host is derived from it in memory.py (nothing else is auto-injected).
           - name: LAKEBASE_ENDPOINT
             value_from: agent_memory_postgres
+          - name: LONG_TERM_MEMORY_VOLUME
+            value_from: memory_events
+          - name: LONG_TERM_MEMORY_PIPELINE_ID
+            value: ${var.memory_pipeline_id}
+          - name: LONG_TERM_MEMORY_AUTO_EXPORT
+            value: "false"
+          - name: LONG_TERM_MEMORY_SHARED_STORAGE
+            value: ${var.shared_memory_storage}
 
       resources:
+        - name: memory_events
+          uc_securable:
+            securable_full_name: ${var.memory_volume}
+            securable_type: VOLUME
+            permission: WRITE_VOLUME
         - name: tpch_orders_genie
           genie_space:
             name: TPC-H Order Analytics (Router)

@@ -76,3 +76,15 @@ export LAKEBASE_ENDPOINT=projects/genie-smart-router-memory/branches/smart-route
 export LAKEBASE_HOST=ep-bitter-bird-d21lj117.database.us-east-1.cloud.databricks.com
 DATABRICKS_CONFIG_PROFILE=<profile> DEV_USER=me@example.com uv run python app.py
 ```
+
+## Long-term memory pipeline
+
+`memory_pipeline/` adds a separate **Lakeflow Spark Declarative Pipeline** that learns
+durable facts from user messages and consolidates them into actor-scoped Lakebase memories.
+The **Distill memory** button below the app header publishes only the signed-in user's
+selected conversation after confirmation, triggers the pipeline, and reports progress/errors.
+Automatic export is disabled in the app bundle; new conversations recall extracted facts.
+Set bundle variables `memory_volume` (three-part UC volume name) and `memory_pipeline_id`
+before deploying. Existing app names can be preserved with the `app_name` variable.
+See [pipeline setup, deployment, limits, and live smoke tests](memory_pipeline/README.md).
+Run local tests with `.venv/bin/python -m unittest discover -s tests -v`.

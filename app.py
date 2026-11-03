@@ -19,7 +19,9 @@ from flask import request
 
 import agent
 import genie
+import long_term_memory
 import memory
+import memory_actions
 
 _log = logging.getLogger(__name__)
 
@@ -218,6 +220,9 @@ server = app.server
 
 # probe the Lakebase branch in the background (ready, or fall back to in-memory sessions)
 threading.Thread(target=memory.warm, daemon=True, name="memory-warm").start()
+if long_term_memory.source_path():
+    threading.Thread(target=long_term_memory.warm, daemon=True, name="memory-tables-warm").start()
+long_term_memory.start_publisher()
 
 
 def _layout():
@@ -230,6 +235,15 @@ def _layout():
         live = _live.get(user)
     return html.Div([
         dcc.Interval(id="tick", interval=1000, disabled=not (live and not live.get("done"))),
+        dcc.Interval(id="memory-tick", interval=2000,
+                     disabled=not memory_actions.status(user)["running"]),
+        dcc.ConfirmDialog(id="memory-confirm", message=(
+            "Publish this conversation's user messages and distill durable facts? "
+            "Source messages, evidence and extracted facts are retained. "
+            + ("WARNING: the selected catalog grants all account users access to these "
+               "source messages, including write access. Do not submit private or sensitive information. "
+               if os.environ.get("LONG_TERM_MEMORY_SHARED_STORAGE") == "true" else "")
+            + "Other conversations will not be exported. Model inference incurs usage.")),
         html.Div(className="app-shell", children=[
             html.Div(id="sidebar", className="sidebar", children=_sidebar(user)),
             html.Div(className="main", children=[
@@ -251,6 +265,15 @@ def _layout():
                         ), className="router-select-wrap"),
                     ], className="header-right"),
                 ], className="app-header"),
+                html.Div([
+                    html.Button([html.I(className="bi bi-stars me-2"), "Distill memory"],
+                                id="distill-memory", n_clicks=0, className="memory-btn",
+                                disabled=not memory_actions.configured() or not data["active"]),
+                    html.Div(id="memory-status", children=memory_actions.status(user)["message"],
+                             role="status", **{"aria-live": "polite"}),
+                    html.Small("Only this chat’s user messages · recalled in new chats",
+                               className="memory-note"),
+                ], className="memory-panel"),
                 html.Div(id="chat", className="chat", children=_chat_view(user)),
                 html.Div([
                     dcc.Input(id="msg", placeholder="Ask about TPC-H orders or NYC taxi trips…",
@@ -264,6 +287,41 @@ def _layout():
 
 
 app.layout = _layout
+
+
+@app.callback(Output("memory-confirm", "displayed"), Input("distill-memory", "n_clicks"),
+              prevent_initial_call=True)
+def _confirm_distillation(clicks):
+    return bool(clicks)
+
+
+@app.callback(Output("memory-status", "children"), Output("distill-memory", "disabled"),
+              Output("memory-tick", "disabled"), Input("memory-confirm", "submit_n_clicks"),
+              Input("memory-tick", "n_intervals"), Input("sidebar", "children"),
+              Input("tick", "n_intervals"))
+def _memory_progress(submits, memory_ticks, sidebar, chat_ticks):
+    user = _user()
+    with _live_lock:
+        busy = bool(_live.get(user) and not _live[user].get("done"))
+    if dash.ctx.triggered_id == "memory-confirm" and submits:
+        if busy:
+            return "Wait for the current chat turn to finish before distilling.", True, True
+        _settle(user)
+        try:
+            memory_actions.start(user, _user_state(user)["active"])
+        except ValueError as error:
+            return str(error), not memory_actions.configured(), True
+    progress = memory_actions.status(user)
+    children = [html.Span(progress["message"])]
+    if progress.get("url"):
+        children.append(html.A("Pipeline details ↗", href=progress["url"], target="_blank",
+                               rel="noopener noreferrer", className="memory-link"))
+    configured = memory_actions.configured()
+    if not configured:
+        children = "Memory distillation is not configured or durable storage is unavailable."
+    disabled = (not configured or busy or progress["running"]
+                or not _user_state(user)["active"])
+    return children, disabled, not progress["running"]
 
 
 def _pretty(text: str) -> str:
@@ -349,6 +407,7 @@ def _execute_turn(live: dict, text: str, token: str | None):
         client = genie.user_client(token)
         reply, model_route, _ = _on_loop(agent.run(
             text, session=live["session"], user_client=client,
+            actor_id=live["actor_id"],
             model_router=live.get("router") or "task_v2",
             on_event=lambda ev: _live_event(live, ev)))
         _live_event(live, {"kind": "model", "model": model_route[0], "why": model_route[1],
@@ -427,7 +486,9 @@ def on_message(_send, _submit, _tick, _new, _items, _branch, router_sel, text):
         data["active"] = rec["id"]
 
     token = _user_token()
-    new_live = {"sid": rec["id"], "events": [{"kind": "user", "text": text.strip()}],
+    new_live = {"sid": rec["id"], "actor_id": user,
+                "events": [{"kind": "user", "text": text.strip(),
+                            "event_id": uuid.uuid4().hex, "created": time.time()}],
                 "done": False, "error": None, "session": rec["session"],
                 "router": data.get("router") or "task_v2"}
     with _live_lock:

@@ -1,0 +1,69 @@
+bundle:
+  name: genie_router_memory
+
+variables:
+  catalog:
+    description: Existing Unity Catalog catalog for the pipeline and landing volume
+  schema:
+    description: Existing Unity Catalog schema for the pipeline and landing volume
+  lakebase_endpoint:
+    description: Lakebase endpoint resource path used by the router application
+  memory_model:
+    description: Unity AI Gateway model service accessible to the pipeline identity
+  app_service_principal:
+    description: Router app service principal allowed to trigger distillation
+  postgres_database:
+    default: databricks_postgres
+  postgres_schema:
+    default: agent_memory
+
+sync:
+  paths:
+    - ..
+  exclude:
+    - ../tests/**
+    - ../scripts/**
+    - ../pyproject.toml
+
+resources:
+  volumes:
+    memory_events:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: genie_memory_events
+      volume_type: MANAGED
+      comment: Immutable user message events for the long-term memory pipeline
+  pipelines:
+    long_term_memory:
+      name: genie-router-long-term-memory
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      serverless: true
+      continuous: false
+      channel: PREVIEW
+      permissions:
+        - service_principal_name: ${var.app_service_principal}
+          level: CAN_RUN
+      edition: ADVANCED
+      root_path: ${workspace.file_path}
+      libraries:
+        - glob:
+            include: ${workspace.file_path}/memory_pipeline/definitions.py
+      environment:
+        dependencies:
+          - databricks-sdk==0.156.0
+          - pg8000==1.31.6
+          - scramp==1.5.0
+      configuration:
+        memory.source_path: /Volumes/${resources.volumes.memory_events.catalog_name}/${resources.volumes.memory_events.schema_name}/${resources.volumes.memory_events.name}/events
+        memory.lakebase_endpoint: ${var.lakebase_endpoint}
+        memory.database: ${var.postgres_database}
+        memory.schema: ${var.postgres_schema}
+        memory.model: ${var.memory_model}
+        pipelines.numUpdateRetryAttempts: "0"
+        pipelines.maxFlowRetryAttempts: "0"
+
+targets:
+  dev:
+    mode: development
+    default: true
