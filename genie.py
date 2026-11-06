@@ -1,6 +1,6 @@
 """Genie tools using user-scoped MCP or server-assigned OAuth claims.
 
-With GENIE_CUSTOM_CLAIMS=true, Asana tools use the Genie Conversation API with
+With GENIE_CUSTOM_CLAIMS=true, membership tools use the Genie Conversation API with
 claim-bearing service-principal tokens. Otherwise they retain the on-behalf-of flow below.
 
 Each Genie agent is a Databricks managed MCP server at
@@ -39,17 +39,31 @@ SPACE_VARIABLES = ({
 })
 SPACES = {name: os.environ[variable] for name, variable in SPACE_VARIABLES.items()
           if os.environ.get(variable)}
-CHAT_TOPICS = ("synthetic Asana revenue or marketing campaigns" if DATASET == "asana"
+CHAT_TOPICS = ("membership revenue or marketing campaigns" if DATASET == "asana"
                else "TPC-H orders or NYC taxi trips")
+
+# Display names for the chat's route/tool boxes (internal keys stay wired to env vars)
+LABELS = {
+    "genie_asana_revenue": "membership_revenue",
+    "genie_asana_marketing": "marketing_campaigns",
+    "genie_tpch_orders": "tpch_orders",
+    "genie_nyc_taxi": "nyc_taxi",
+}
+
+
+def label(name: str | None) -> str:
+    """User-facing name of a Genie agent/tool (falls back to the key sans `genie_`)."""
+    return LABELS.get(name or "", (name or "?").removeprefix("genie_"))
+
 
 # What each Genie agent covers (the router model picks one per turn from these)
 DESCRIPTIONS = {
-    "genie_asana_revenue": "Synthetic Asana-style SaaS revenue: subscription revenue, MRR, "
-                          "ARR, seats, plans, regions, acquisition channels, expansion and churn. "
-                          "Not real Asana data.",
-    "genie_asana_marketing": "Synthetic Asana-style marketing: campaign spend, channel performance, "
-                            "leads, conversion funnel, acquisition costs and attributed new MRR. "
-                            "Includes a paid-social lead-quality decline. Not real Asana data.",
+    "genie_asana_revenue": "Paid-membership revenue: monthly membership revenue, annual membership "
+                          "revenue run-rate, members, membership tiers, member households, regions, "
+                          "expansion and churn.",
+    "genie_asana_marketing": "Membership marketing campaigns: campaign spend, channel performance, "
+                            "leads, conversion funnel, acquisition costs and attributed new membership "
+                            "revenue. Includes a paid-social lead-quality decline.",
     "genie_tpch_orders": "TPC-H B2B orders data: orders, revenue, customers, market segments, "
                          "nations/regions, line items, shipping modes and returns (1992-1998).",
     "genie_nyc_taxi": "NYC yellow taxi trips (Jan-Feb 2016): trip counts, fares, distances, "
@@ -96,7 +110,7 @@ def _claim_tool(name: str, space_id: str, client, role: str):
 
     @function_tool(name_override=name, description_override=DESCRIPTIONS[name], is_enabled=allowed)
     async def query(question: str) -> str:
-        """Ask a self-contained question about the synthetic dataset."""
+        """Ask a self-contained question about the retailer's membership data."""
         if name == "genie_asana_revenue" and role != "admin":
             return "Access denied: the user role cannot read revenue. Do not infer or invent revenue values."
         return await asyncio.to_thread(query_with_claim, client, space_id, question)
@@ -106,7 +120,7 @@ def _claim_tool(name: str, space_id: str, client, role: str):
 
 async def claim_tools(end_user_client, email: str, requested_role: str | None = None):
     if DATASET != "asana":
-        raise ValueError("Custom revenue claims require the Asana dataset")
+        raise ValueError("Custom revenue claims require the membership dataset")
     client = await asyncio.to_thread(claims_auth.client_for, end_user_client, email, requested_role)
     return [_claim_tool(name, space_id, client, claims_auth.effective_role(email, requested_role))
             for name, space_id in SPACES.items()]

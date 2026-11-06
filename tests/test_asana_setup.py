@@ -90,7 +90,7 @@ class AsanaSetupTests(unittest.TestCase):
                 configured = importlib.reload(genie)
                 self.assertEqual(configured.SPACES, {"genie_asana_revenue": "revenue-id",
                                                      "genie_asana_marketing": "marketing-id"})
-                self.assertIn("synthetic Asana", configured.CHAT_TOPICS)
+                self.assertIn("membership revenue", configured.CHAT_TOPICS)
         finally:
             importlib.reload(genie)
 
