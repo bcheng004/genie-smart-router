@@ -20,6 +20,10 @@ variables:
   router_model:
     description: Small System One model that routes each turn to a Genie agent
     default: "system.ai.openjev-qwen35-4b"
+  model_router:
+    description: Unity Gateway routing API router name (task_v2); any other value disables
+      model routing so every turn uses ${var.model} — used for A/B cost baselines
+    default: "task_v2"
   # Genie agents (scripts/create_genie_agents.py); ids are written by the script or set here
   tpch_genie_space_id:
     description: Genie space of the TPC-H Order Analytics agent
@@ -59,6 +63,11 @@ resources:
             value: ${var.model}
           - name: ROUTER_MODEL
             value: ${var.router_model}
+          - name: MODEL_ROUTER
+            value: ${var.model_router}
+          # services whose Unity Gateway rate limit is 0 in this workspace (every call is 403)
+          - name: MODEL_EXCLUDE
+            value: "system.ai.claude-opus-4-8,system.ai.gpt-5-5"
           - name: LAKEBASE_ENDPOINT
             value_from: agent_memory_postgres
           - name: LONG_TERM_MEMORY_VOLUME
@@ -93,12 +102,12 @@ resources:
             permission: CAN_CONNECT_AND_CREATE
         - name: asana_revenue_genie
           genie_space:
-            name: Asana Revenue (Synthetic Claims Router)
+            name: Membership Revenue
             space_id: 01f1d744b923143ba9ca9674f24b978b
             permission: CAN_RUN
         - name: asana_marketing_genie
           genie_space:
-            name: Asana Marketing (Synthetic Claims Router)
+            name: Marketing Campaigns
             space_id: 01f1d744b9f31c018966ce4acb1b42ac
             permission: CAN_RUN
 targets:

@@ -227,7 +227,7 @@ def _sidebar(user: str) -> list:
 
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.BOOTSTRAP],
-                title="Genie Smart Router")
+                title="Membership Insights Assistant")
 server = app.server
 
 # probe the Lakebase branch in the background (ready, or fall back to in-memory sessions)
@@ -261,7 +261,7 @@ def _layout():
             html.Div(id="sidebar", className="sidebar", children=_sidebar(user)),
             html.Div(className="main", children=[
                 html.Div([  # header
-                    html.H3("Genie Smart Router", className="app-title"),
+                    html.H3("Membership Insights Assistant", className="app-title"),
                     html.Div([
                         html.Span([html.I(className="bi bi-signpost-split-fill me-1"),
                                    "Smart routing"], className="route-badge",
@@ -271,10 +271,10 @@ def _layout():
                             id="claim-role", clearable=False, searchable=False,
                             className="router-select",
                             options=([
-                                {"label": "Claim: admin — revenue allowed", "value": "admin"},
-                                {"label": "Claim: user — revenue denied", "value": "user"},
+                                {"label": "Claim: admin — membership revenue allowed", "value": "admin"},
+                                {"label": "Claim: user — membership revenue denied", "value": "user"},
                             ] if claims_auth.role_for(_user_email()) == "admin" else [
-                                {"label": "Claim: user — revenue denied", "value": "user"},
+                                {"label": "Claim: user — membership revenue denied", "value": "user"},
                             ]),
                             value=claims_auth.role_for(_user_email()),
                             disabled=claims_auth.role_for(_user_email()) != "admin",
@@ -413,7 +413,7 @@ def _pretty(text: str) -> str:
 def _tool_box(call: dict, running: bool = False):
     """One Genie MCP tool call as a box: name, args and output, each collapsible. `running`
     marks a streamed call whose result hasn't arrived yet (spinner)."""
-    name = call.get("name") or "tool"
+    name = genie.label(call.get("name") or "tool")
     body = [html.Code(name, className="tool-name")]
     if running:
         body.append(html.I(className="bi bi-arrow-repeat ms-2 tool-spin"))
@@ -430,8 +430,7 @@ def _tool_box(call: dict, running: bool = False):
 def _genie_route_box(decision: dict | None) -> html.Div:
     """The openjev router's decision: which Genie agent answers this turn."""
     if decision:
-        label = (decision["choice"] or "?").removeprefix("genie_")
-        text = f"routed to {label} ({decision['confidence']:.2f})"
+        text = f"routed to {genie.label(decision['choice'])} ({decision['confidence']:.2f})"
     else:
         text = "unsure — model picks the data source"
     return html.Div([html.Code("openjev", className="tool-name"),

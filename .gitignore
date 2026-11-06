@@ -17,4 +17,4 @@ venv/
 .vscode
 uv.lock
 .omc
-
+.isaac
